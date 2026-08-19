@@ -1,6 +1,10 @@
 # AST2700 BMC 验证平台（QEMU）
 
+[![BMC-QEMU-CI](https://github.com/WangXianzhen/bmc-qemu-platform/actions/workflows/bmc-qemu-ci.yml/badge.svg)](https://github.com/WangXianzhen/bmc-qemu-platform/actions/workflows/bmc-qemu-ci.yml)
+
 基于 QEMU master（AST2700 A2）的 **BMC 功能 / 性能 / 异常注错验证平台**：BMC 固件（OpenBMC SDK v11.03）为被测体，被管理平台部件（传感器/PSU/风扇/PCIe/存储/带外通道）由 QEMU 仿真，经 QMP 控制平面注入故障；性能以 `-icount` + `x-query-jit` 确定性指标做版本回归。
+
+> CI 状态（2026-08-19 验证）：构建 + 补丁 → 控制平面 9/9 → AST2700 启动 + pytest（6 通过 / 2 已知缺口跳过）→ 性能门禁（确定性指标 ±10%）全绿。
 
 ## 目录
 
@@ -36,5 +40,6 @@ python3 faultinject/tests/live_fault_smoke.py
 ## 已知限制
 
 - `inject-nmi` 在 AST2700 不可用（Cortex-A35 无 FEAT_NMI，机器级限制，详见设计方案 §7）
+- 存储 IO 错误用例：blkdebug 注入的 EIO 会触发 nvme 驱动重试循环导致 guest dd 挂起（`RC=124` 时用例带原因跳过）；块层故障注入已验证，guest 可见完成路径待 nvme 错误处理跟进
 - Redfish 延迟指标需 PCIe2 fdt workaround（BMC 网卡获 IP 后可用，pytest 中优雅跳过）
-- 双 QEMU 联动（x86 host guest + BMC 互联）为路线图项，见设计方案 M4
+- 双 QEMU 联动（x86 host guest + BMC 互联）为路线图项，见设计方案 M4 与 `faultinject/dual/`
