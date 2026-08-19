@@ -34,9 +34,11 @@ if [ "${SKIP_DEPS:-0}" != "1" ]; then
   log "installing build/test dependencies"
   sudo apt-get update -qq
   sudo apt-get install -y -qq \
-    build-essential pkg-config meson ninja-build python3 python3-pip python3-pytest \
+    build-essential pkg-config ninja-build python3 python3-pip python3-pytest \
     libglib2.0-dev libpixman-1-dev zlib1g-dev libslirp-dev libfdt-dev \
     libpng-dev libjpeg-dev flex bison git curl
+  # QEMU 11.x requires meson >= 1.2; pip version avoids distro staleness
+  $PY -m pip install -q --break-system-packages meson
 fi
 
 # 2) QEMU source + local patches --------------------------------------------
