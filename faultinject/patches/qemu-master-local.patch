@@ -1,0 +1,443 @@
+diff --git a/hw/arm/aspeed_ast27x0.c b/hw/arm/aspeed_ast27x0.c
+index 6365dbd63..d2af62e16 100644
+--- a/hw/arm/aspeed_ast27x0.c
++++ b/hw/arm/aspeed_ast27x0.c
+@@ -75,6 +75,7 @@ static const hwaddr aspeed_soc_ast2700_memmap[] = {
+     [ASPEED_DEV_INTCIO]    =  0x14C18000,
+     [ASPEED_DEV_PCIE_PHY2] =  0x14C1C000,
+     [ASPEED_DEV_SLIIO]     =  0x14C1E000,
++    [ASPEED_DEV_PECI]      =  0x14C1F000,
+     [ASPEED_DEV_VUART]     =  0x14C30000,
+     [ASPEED_DEV_UART0]     =  0x14C33000,
+     [ASPEED_DEV_UART1]     =  0x14C33100,
+@@ -492,6 +493,7 @@ static void aspeed_soc_ast2700_init(Object *obj)
+ 
+     object_initialize_child(obj, "sli", &s->sli, TYPE_ASPEED_2700_SLI);
+     object_initialize_child(obj, "sliio", &s->sliio, TYPE_ASPEED_2700_SLIIO);
++    object_initialize_child(obj, "peci", &a->peci, TYPE_ASPEED_PECI);
+     object_initialize_child(obj, "intc", &a->intc[0], TYPE_ASPEED_2700_INTC);
+     object_initialize_child(obj, "intcio", &a->intc[1],
+                             TYPE_ASPEED_2700_INTCIO);
+@@ -955,6 +957,15 @@ static void aspeed_soc_ast2700_realize(DeviceState *dev, Error **errp)
+     aspeed_mmio_map(s->memory, SYS_BUS_DEVICE(&s->sliio), 0,
+                     sc->memmap[ASPEED_DEV_SLIIO]);
+ 
++    /* PECI (local patch P4): host CPU status interface @0x14C1F000 */
++    if (!sysbus_realize(SYS_BUS_DEVICE(&a->peci), errp)) {
++        return;
++    }
++    aspeed_mmio_map(s->memory, SYS_BUS_DEVICE(&a->peci), 0,
++                    sc->memmap[ASPEED_DEV_PECI]);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&a->peci), 0,
++                       aspeed_soc_ast2700_get_irq(s, ASPEED_DEV_PECI));
++
+     /* ADC */
+     if (!sysbus_realize(SYS_BUS_DEVICE(&s->adc), errp)) {
+         return;
+diff --git a/hw/misc/aspeed_ltpi.c b/hw/misc/aspeed_ltpi.c
+index 2e413550b..1dc27de7f 100644
+--- a/hw/misc/aspeed_ltpi.c
++++ b/hw/misc/aspeed_ltpi.c
+@@ -9,6 +9,7 @@
+ #include "qemu/osdep.h"
+ #include "qemu/log.h"
+ #include "migration/vmstate.h"
++#include "qom/object.h"
+ #include "hw/misc/aspeed_ltpi.h"
+ 
+ #define ASPEED_LTPI_CTRL_BASE   0x000
+@@ -85,8 +86,18 @@ static uint64_t aspeed_ltpi_ctrl_read(void *opaque,
+ {
+     AspeedLTPIState *s = opaque;
+     uint32_t idx = offset >> 2;
++    uint32_t val = s->ctrl_regs[idx];
+ 
+-    return s->ctrl_regs[idx];
++    /* Fault-injection overlays (local patch P2):
++     * "link-down" forces the link-up bit clear; "fault-code" ORs into the
++     * fault-status register. Both are QMP/qom-set controllable. */
++    if (s->link_down && idx == ASPEED_LTPI_LINK_MNG_IDX) {
++        val &= ~ASPEED_LTPI_LINK_UP_BIT;
++    }
++    if (s->fault_code && idx == ASPEED_LTPI_FAULT_IDX) {
++        val |= s->fault_code;
++    }
++    return val;
+ }
+ 
+ static void aspeed_ltpi_ctrl_write(void *opaque, hwaddr offset,
+@@ -136,11 +147,39 @@ static const VMStateDescription vmstate_aspeed_ltpi = {
+                              ASPEED_LTPI_PHY_SIZE >> 2),
+         VMSTATE_UINT32_ARRAY(top_regs, AspeedLTPIState,
+                              ASPEED_LTPI_TOP_SIZE >> 2),
++        VMSTATE_BOOL(link_down, AspeedLTPIState),
++        VMSTATE_UINT32(fault_code, AspeedLTPIState),
+ 
+         VMSTATE_END_OF_LIST()
+     }
+ };
+ 
++/*
++ * Fault-injection properties (local patch P2). These are runtime-settable
++ * (object_property_add_* in instance_init), i.e. QMP qom-set works after
++ * realize, unlike DEFINE_PROP_* which only allow pre-realize values.
++ */
++static bool aspeed_ltpi_get_link_down(Object *obj, Error **errp)
++{
++    return ASPEED_LTPI(obj)->link_down;
++}
++
++static void aspeed_ltpi_set_link_down(Object *obj, bool value, Error **errp)
++{
++    ASPEED_LTPI(obj)->link_down = value;
++}
++
++static void aspeed_ltpi_init(Object *obj)
++{
++    AspeedLTPIState *s = ASPEED_LTPI(obj);
++
++    object_property_add_bool(obj, "link-down",
++                             aspeed_ltpi_get_link_down,
++                             aspeed_ltpi_set_link_down);
++    object_property_add_uint32_ptr(obj, "fault-code", &s->fault_code,
++                                   OBJ_PROP_FLAG_READWRITE);
++}
++
+ static void aspeed_ltpi_realize(DeviceState *dev, Error **errp)
+ {
+     AspeedLTPIState *s = ASPEED_LTPI(dev);
+@@ -184,6 +223,7 @@ static const TypeInfo aspeed_ltpi_types[] = {
+         .name          = TYPE_ASPEED_LTPI,
+         .parent        = TYPE_SYS_BUS_DEVICE,
+         .instance_size = sizeof(AspeedLTPIState),
++        .instance_init = aspeed_ltpi_init,
+         .class_init    = aspeed_ltpi_class_init,
+     }
+ };
+diff --git a/hw/misc/aspeed_peci.c b/hw/misc/aspeed_peci.c
+index 7469f82fa..c018fca88 100644
+--- a/hw/misc/aspeed_peci.c
++++ b/hw/misc/aspeed_peci.c
+@@ -95,8 +95,20 @@ static void aspeed_peci_write(void *opaque, hwaddr offset, uint64_t data,
+                           __func__, s->regs[R_PECI_INT_STS]);
+             break;
+         }
+-        s->regs[R_PECI_RD_DATA0] = ASPEED_PECI_CC_RSP_SUCCESS;
+-        s->regs[R_PECI_WR_DATA0] = ASPEED_PECI_CC_RSP_SUCCESS;
++        if (s->host_lost) {
++            /* Fault injection (P4): host CPU unplugged - the command never
++             * completes, so the guest observes a PECI timeout. */
++            break;
++        }
++        if (s->temp_fault) {
++            /* Fault injection (P4): host present but faulted - complete with
++             * an error completion code instead of success. */
++            s->regs[R_PECI_RD_DATA0] = 0xE0;
++            s->regs[R_PECI_WR_DATA0] = 0xE0;
++        } else {
++            s->regs[R_PECI_RD_DATA0] = ASPEED_PECI_CC_RSP_SUCCESS;
++            s->regs[R_PECI_WR_DATA0] = ASPEED_PECI_CC_RSP_SUCCESS;
++        }
+         aspeed_peci_raise_interrupt(s,
+                                     FIELD_DP32(0, PECI_INT_STS, CMD_DONE, 1));
+         break;
+@@ -130,6 +142,43 @@ static void aspeed_peci_reset_hold(Object *obj, ResetType type)
+     memset(s->regs, 0, sizeof(s->regs));
+ }
+ 
++/*
++ * Fault-injection properties (local patch P4):
++ *  - "host-lost"  (bool): host CPU unplugged -> PECI commands never complete
++ *                         (guest sees timeout)
++ *  - "temp-fault" (bool): host faulted -> commands complete with error CC
++ * Both are runtime-settable via QMP qom-set (/machine/soc/peci).
++ */
++static bool aspeed_peci_get_host_lost(Object *obj, Error **errp)
++{
++    return ASPEED_PECI(obj)->host_lost;
++}
++
++static void aspeed_peci_set_host_lost(Object *obj, bool value, Error **errp)
++{
++    ASPEED_PECI(obj)->host_lost = value;
++}
++
++static bool aspeed_peci_get_temp_fault(Object *obj, Error **errp)
++{
++    return ASPEED_PECI(obj)->temp_fault;
++}
++
++static void aspeed_peci_set_temp_fault(Object *obj, bool value, Error **errp)
++{
++    ASPEED_PECI(obj)->temp_fault = value;
++}
++
++static void aspeed_peci_init(Object *obj)
++{
++    object_property_add_bool(obj, "host-lost",
++                             aspeed_peci_get_host_lost,
++                             aspeed_peci_set_host_lost);
++    object_property_add_bool(obj, "temp-fault",
++                             aspeed_peci_get_temp_fault,
++                             aspeed_peci_set_temp_fault);
++}
++
+ static void aspeed_peci_class_init(ObjectClass *klass, const void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+@@ -145,6 +194,7 @@ static const TypeInfo aspeed_peci_types[] = {
+         .name = TYPE_ASPEED_PECI,
+         .parent = TYPE_SYS_BUS_DEVICE,
+         .instance_size = sizeof(AspeedPECIState),
++        .instance_init = aspeed_peci_init,
+         .class_init = aspeed_peci_class_init,
+         .abstract = false,
+     },
+diff --git a/hw/misc/aspeed_sdmc.c b/hw/misc/aspeed_sdmc.c
+index f8fbaebee..6101473bc 100644
+--- a/hw/misc/aspeed_sdmc.c
++++ b/hw/misc/aspeed_sdmc.c
+@@ -642,6 +642,46 @@ static void aspeed_2700_sdmc_write(AspeedSDMCState *s, uint32_t reg,
+     s->regs[reg] = data;
+ }
+ 
++/*
++ * Fault-injection properties (local patch P3): DRAM ECC error injection.
++ * Setting "inject-ecc-error"=true records an ECC failure in the SDMC status
++ * registers (R_ECC_FAIL_STATUS / R_ECC_FAIL_ADDR), which firmware can read
++ * at 0x12c00078 / 0x12c0007c. "ecc-error-addr" selects the reported address.
++ * (Physical SError delivery is not implemented in TCG ARM, so the fault is
++ * exposed through the SDMC status registers, matching the SoC's error path.)
++ */
++static bool aspeed_sdmc_get_inject_ecc_error(Object *obj, Error **errp)
++{
++    return ASPEED_SDMC(obj)->regs[R_ECC_FAIL_STATUS] != 0;
++}
++
++static void aspeed_sdmc_set_inject_ecc_error(Object *obj, bool value,
++                                             Error **errp)
++{
++    AspeedSDMCState *s = ASPEED_SDMC(obj);
++
++    if (value) {
++        s->regs[R_ECC_FAIL_STATUS] |= 0x1;  /* ECC error flag (bit per datasheet) */
++        s->regs[R_ECC_FAIL_ADDR] = s->ecc_err_addr;
++    } else {
++        s->regs[R_ECC_FAIL_STATUS] &= ~0x1;
++    }
++}
++
++static void aspeed_2700_sdmc_initfn(Object *obj)
++{
++    AspeedSDMCState *s = ASPEED_SDMC(obj);
++
++    object_property_add_bool(obj, "inject-ecc-error",
++                             aspeed_sdmc_get_inject_ecc_error,
++                             aspeed_sdmc_set_inject_ecc_error);
++    object_property_add_uint32_ptr(obj, "ecc-error-addr", &s->ecc_err_addr,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_uint32_ptr(obj, "ecc-fail-status",
++                                   &s->regs[R_ECC_FAIL_STATUS],
++                                   OBJ_PROP_FLAG_READ);
++}
++
+ static const uint64_t
+     aspeed_2700_ram_sizes[] = { 256 * MiB, 512 * MiB, 1024 * MiB,
+                                 2048 * MiB, 4096 * MiB, 8192 * MiB, 0};
+@@ -690,6 +730,7 @@ static const TypeInfo aspeed_sdmc_types[] = {
+     {
+         .name = TYPE_ASPEED_2700_SDMC,
+         .parent = TYPE_ASPEED_SDMC,
++        .instance_init = aspeed_2700_sdmc_initfn,
+         .class_init = aspeed_2700_sdmc_class_init,
+     }
+ };
+diff --git a/hw/sensor/max31785.c b/hw/sensor/max31785.c
+index 468858a60..80c8ee46e 100644
+--- a/hw/sensor/max31785.c
++++ b/hw/sensor/max31785.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qom/object.h"
+ #include "hw/i2c/pmbus_device.h"
+ #include "hw/core/irq.h"
+ #include "migration/vmstate.h"
+@@ -164,6 +165,9 @@ typedef struct MAX31785State {
+     uint64_t mfr_date;
+     uint64_t mfr_serial;
+     uint16_t mfr_revision;
++
++    /* Fault-injection state (local patch P5): bit i = fan page i faulted */
++    uint16_t fan_fault_mask;
+ } MAX31785State;
+ 
+ static uint8_t max31785_read_byte(PMBusDevice *pmdev)
+@@ -185,13 +189,23 @@ static uint8_t max31785_read_byte(PMBusDevice *pmdev)
+ 
+     case PMBUS_READ_FAN_SPEED_1:
+         if (pmdev->page <= MAX31785_MAX_FAN_PAGE) {
+-            pmbus_send16(pmdev, pmdev->pages[pmdev->page].read_fan_speed_1);
++            if (s->fan_fault_mask & BIT(pmdev->page)) {
++                /* Fault injection (P5): stalled fan reports 0 RPM */
++                pmbus_send16(pmdev, 0);
++            } else {
++                pmbus_send16(pmdev, pmdev->pages[pmdev->page].read_fan_speed_1);
++            }
+         }
+         break;
+ 
+     case PMBUS_STATUS_FANS_1_2:
+         if (pmdev->page <= MAX31785_MAX_FAN_PAGE) {
+-            pmbus_send16(pmdev, pmdev->pages[pmdev->page].status_fans_1_2);
++            uint16_t st = pmdev->pages[pmdev->page].status_fans_1_2;
++            /* Fault injection (P5): fan1/2 fault bits (pages 0/1) */
++            if (pmdev->page < 2) {
++                st |= (s->fan_fault_mask >> pmdev->page) & 0x1;
++            }
++            pmbus_send16(pmdev, st);
+         }
+         break;
+ 
+@@ -520,6 +534,7 @@ static const VMStateDescription vmstate_max31785 = {
+         VMSTATE_UINT64(mfr_location, MAX31785State),
+         VMSTATE_UINT64(mfr_date, MAX31785State),
+         VMSTATE_UINT64(mfr_serial, MAX31785State),
++        VMSTATE_UINT16(fan_fault_mask, MAX31785State),
+         VMSTATE_END_OF_LIST()
+     }
+ };
+@@ -527,6 +542,11 @@ static const VMStateDescription vmstate_max31785 = {
+ static void max31785_init(Object *obj)
+ {
+     PMBusDevice *pmdev = PMBUS_DEVICE(obj);
++    MAX31785State *s = MAX31785(obj);
++
++    /* Fault injection (local patch P5): bit i of the mask faults fan page i */
++    object_property_add_uint16_ptr(obj, "fan-fault-mask", &s->fan_fault_mask,
++                                   OBJ_PROP_FLAG_READWRITE);
+ 
+     for (int i = MAX31785_MIN_FAN_PAGE; i <= MAX31785_MAX_FAN_PAGE; i++) {
+         pmbus_page_config(pmdev, i, PB_HAS_VOUT_MODE);
+diff --git a/include/hw/arm/aspeed_soc.h b/include/hw/arm/aspeed_soc.h
+index cd68c7f1c..76fe846e6 100644
+--- a/include/hw/arm/aspeed_soc.h
++++ b/include/hw/arm/aspeed_soc.h
+@@ -152,6 +152,7 @@ struct Aspeed27x0SoCState {
+     GICv3State gic;
+     MemoryRegion dram_empty;
+     Aspeed2700SCUState scu;
++    AspeedPECIState peci;   /* local patch P4: AST2700 PECI (0x14C1F000) */
+ };
+ 
+ #define TYPE_ASPEED27X0_SOC "aspeed27x0-soc"
+diff --git a/include/hw/misc/aspeed_ltpi.h b/include/hw/misc/aspeed_ltpi.h
+index 3330a49b0..9bb200458 100644
+--- a/include/hw/misc/aspeed_ltpi.h
++++ b/include/hw/misc/aspeed_ltpi.h
+@@ -18,6 +18,20 @@ OBJECT_DECLARE_SIMPLE_TYPE(AspeedLTPIState, ASPEED_LTPI)
+ #define ASPEED_LTPI_PHY_SIZE    0x100
+ #define ASPEED_LTPI_TOP_SIZE    0x100
+ 
++/*
++ * Fault-injection extension (local patch P2):
++ *  - "link-down"  (bool):   when set, the link-up bit of the LTPI link
++ *                           management register is forced to 0 on reads,
++ *                           so firmware sees the link as down.
++ *  - "fault-code" (uint32): non-zero value OR-ed into the fault-status
++ *                           register on reads, simulating a protocol error.
++ * The register bit layout follows the AST2700 LTPI description; adjust the
++ * two indices / bit definitions below if the datasheet mapping differs.
++ */
++#define ASPEED_LTPI_LINK_MNG_IDX    0x42   /* ctrl register word offset */
++#define ASPEED_LTPI_LINK_UP_BIT     (1u << 0)
++#define ASPEED_LTPI_FAULT_IDX       0x41   /* ctrl register word offset */
++
+ struct AspeedLTPIState {
+     SysBusDevice parent;
+     MemoryRegion mmio;
+@@ -28,6 +42,10 @@ struct AspeedLTPIState {
+     uint32_t ctrl_regs[ASPEED_LTPI_CTRL_SIZE >> 2];
+     uint32_t phy_regs[ASPEED_LTPI_PHY_SIZE >> 2];
+     uint32_t top_regs[ASPEED_LTPI_TOP_SIZE >> 2];
++
++    /* Fault-injection state (local patch P2) */
++    bool link_down;
++    uint32_t fault_code;
+ };
+ 
+ #endif /* ASPEED_LTPI_H */
+diff --git a/include/hw/misc/aspeed_peci.h b/include/hw/misc/aspeed_peci.h
+index 7680e5bef..2844d4137 100644
+--- a/include/hw/misc/aspeed_peci.h
++++ b/include/hw/misc/aspeed_peci.h
+@@ -24,6 +24,10 @@ struct AspeedPECIState {
+     qemu_irq irq;
+ 
+     uint32_t regs[ASPEED_PECI_NR_REGS];
++
++    /* Fault-injection state (local patch P4) */
++    bool host_lost;    /* host CPU unplugged: PECI commands never complete */
++    bool temp_fault;   /* host reports fault: commands complete with error CC */
+ };
+ 
+ #endif
+diff --git a/include/hw/misc/aspeed_sdmc.h b/include/hw/misc/aspeed_sdmc.h
+index 806b1cbc5..68f4632f5 100644
+--- a/include/hw/misc/aspeed_sdmc.h
++++ b/include/hw/misc/aspeed_sdmc.h
+@@ -43,6 +43,8 @@ struct AspeedSDMCState {
+     uint64_t ram_size;
+     uint64_t max_ram_size;
+     bool unlocked;
++    /* Fault-injection state (local patch P3): address reported on ECC error */
++    uint32_t ecc_err_addr;
+ };
+ 
+ 
+diff --git a/scripts/symlink-install-tree.py b/scripts/symlink-install-tree.py
+index b72563895..fcdc76df7 100644
+--- a/scripts/symlink-install-tree.py
++++ b/scripts/symlink-install-tree.py
+@@ -5,6 +5,7 @@
+ import json
+ import os
+ import shlex
++import shutil
+ import subprocess
+ import sys
+ 
+@@ -15,8 +16,15 @@ def destdir_join(d1: str, d2: str) -> str:
+     return str(PurePath(d1, *PurePath(d2).parts[1:]))
+ 
+ introspect = os.environ.get('MESONINTROSPECT')
+-out = subprocess.run([*shlex.split(introspect), '--installed'],
+-                     stdout=subprocess.PIPE, check=True).stdout
++try:
++    out = subprocess.run([*shlex.split(introspect), '--installed'],
++                         stdout=subprocess.PIPE, check=True).stdout
++except FileNotFoundError:
++    # Local patch: on Windows the bare 'meson' shim (msys2) has no .exe and
++    # cannot be spawned by CreateProcess; run it through the interpreter.
++    out = subprocess.run([sys.executable, '-m', 'mesonbuild.mesonmain',
++                          'introspect', '--installed'],
++                         stdout=subprocess.PIPE, check=True).stdout
+ for source, dest in json.loads(out).items():
+     bundle_dest = destdir_join('qemu-bundle', dest)
+     path = os.path.dirname(bundle_dest)
+@@ -30,7 +38,12 @@ def destdir_join(d1: str, d2: str) -> str:
+     except BaseException as e:
+         if not isinstance(e, OSError) or e.errno != errno.EEXIST:
+             if os.name == 'nt':
+-                print('Please enable Developer Mode to support soft link '
+-                      'without Administrator permission')
++                # Local patch: without Developer Mode / Administrator, plain
++                # symlinks are not permitted on Windows. The qemu-bundle tree
++                # is only needed for install-time DLL bundling, so skip it.
++                print(f'warning: cannot create qemu-bundle entry {dest}, '
++                      'skipping (Windows without symlink privilege)',
++                      file=sys.stderr)
++                continue
+             print(f'error making symbolic link {dest}', file=sys.stderr)
+             raise e

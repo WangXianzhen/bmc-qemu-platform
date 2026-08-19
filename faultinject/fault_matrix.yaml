@@ -1,0 +1,153 @@
+# Fault-injection catalogue for the AST2700 BMC verification platform.
+# Each entry maps a fault to the concrete injection mechanism (QMP/qom-set/HMP/backend).
+# `ready`: yes = works on stock QEMU 11.1/master; patch = needs local patch P1..P6 (see design doc §5).
+
+faults:
+  # ---- 1. sensors / PSU / fans -----------------------------------------
+  temp_high:
+    category: sensor
+    device: temp-mb                # tmp105 on aspeed.i2c.bus.0 @0x4d
+    mechanism: qom-set temperature
+    args: {path: /machine/peripheral/temp-mb, property: temperature, value: 95000}
+    expect: guest hwmon temp1_input ~95000; phosphor-hwmon alarm at threshold
+    ready: yes
+
+  temp_recover:
+    category: sensor
+    device: temp-mb
+    mechanism: qom-set temperature
+    args: {path: /machine/peripheral/temp-mb, property: temperature, value: 25000}
+    expect: alarm clears
+    ready: yes
+
+  psu_power_loss:
+    category: psu
+    device: psu0                   # adm1272 on aspeed.i2c.bus.1 @0x10
+    mechanism: qom-set vout
+    args: {path: /machine/peripheral/psu0, property: vout, value: 0}
+    expect: PSU present/power-good deassert; OpenBMC power state machine reacts
+    ready: yes                     # adm1272 exposes vin/vout/iout props
+
+  psu_overcurrent:
+    category: psu
+    device: psu0
+    mechanism: qom-set iout
+    args: {path: /machine/peripheral/psu0, property: iout, value: 60000}
+    expect: over-current warning in logs
+    ready: yes
+
+  fan_stall:
+    category: fan
+    device: fan-ctl                # max31785 on aspeed.i2c.bus.2 @0x52
+    mechanism: qom-set fan-fault-mask (patch P5, implemented; bit i = fan page i)
+    args: {path: /machine/peripheral/fan-ctl, property: fan-fault-mask, value: 1}
+    expect: fan0 READ_FAN_SPEED_1 returns 0 (stalled); STATUS_FANS_1_2 fault bit set
+    ready: "patch-P5-implemented, live-verified 2026-08-19 (mask set/clear ok)"
+
+  # ---- 2. memory / CPU ---------------------------------------------------
+  nmi_inject:
+    category: cpu
+    device: gic
+    mechanism: QMP inject-nmi
+    args: {}
+    expect: guest NMI handler / firmware crash-path exercised
+    ready: "NO - machine gap: ast2700 has no TYPE_NMI device and Cortex-A35
+            has no FEAT_NMI; use watchdog pause/reset or SError (patch P3)"
+
+  watchdog_expire:
+    category: cpu
+    device: aspeed.wdt
+    mechanism: QMP watchdog-set-action + guest stops feeding WDT
+    args: {action: pause}
+    expect: configured watchdog action fires on expiry (pause/reset work on
+            ast2700; inject-nmi is a no-op due to missing FEAT_NMI)
+    ready: yes
+
+  dram_uncorrectable:
+    category: memory
+    device: sdmc/dram_container
+    mechanism: QMP/qom-set inject-ecc-error + ecc-error-addr (patch P3, implemented)
+    args: {path: /machine/soc/sdmc, property: inject-ecc-error, value: true}
+    expect: SDMC ECC_FAIL_STATUS (0x12c00078) / ECC_FAIL_ADDR (0x12c0007c)
+            report the fault; guest firmware can read them (devmem)
+    ready: "patch-P3-implemented, live-verified 2026-08-19
+            (status=0x1 addr=0x12345678, clear ok)"
+
+  host_mce_x86:                    # optional: dual-QEMU linkage (x86 host guest)
+    category: memory
+    device: host-guest (second qemu-system-x86_64)
+    mechanism: HMP mce via human-monitor-command
+    args: {command-line: "mce 0 0 0xbd80000000100034 0x0 0x0 0x0"}
+    expect: host guest takes MCE; BMC (if linked via IPMB/PECI) sees host status change
+    ready: yes (HMP mce, hmp-commands.hx:1511)
+
+  # ---- 3. PCIe / network --------------------------------------------------
+  aer_uncor_nonfatal:
+    category: pcie
+    device: nvme0
+    mechanism: HMP pcie_aer_inject_error via human-monitor-command
+    args: {command-line: "pcie_aer_inject_error nvme0 0x4000"}
+    expect: guest dmesg AER record; BMC (if attached) sees ERR_NONFATAL
+    ready: yes                    # stock HMP cmd (hw/pci/pci-hmp-cmds.c:173)
+
+  pcie_hotunplug:
+    category: pcie
+    device: nvme0
+    mechanism: QMP device_del
+    args: {id: nvme0}
+    expect: guest removes device; BMC storage-health checks react
+    ready: yes
+
+  nic_link_down:
+    category: network
+    device: net0
+    mechanism: QMP set_link
+    args: {name: net0, up: false}
+    expect: guest NIC carrier down; management path lost/recovered on up
+    ready: yes
+
+  nic_link_up:
+    category: network
+    device: net0
+    mechanism: QMP set_link
+    args: {name: net0, up: true}
+    expect: carrier restored
+    ready: yes
+
+  # ---- 4. storage ---------------------------------------------------------
+  block_io_error:
+    category: storage
+    device: nvmedrv
+    mechanism: werror=stop + host truncates/deletes backing file at runtime
+    args: {backend: nvme.img, action: truncate-to-1M}
+    expect: guest IO error -> VM pauses (query-status shows 'paused'); verify BMC logs
+    ready: yes
+
+  storage_throttle:
+    category: storage
+    device: nvmedrv
+    mechanism: QMP object-add throttle-group (modern API; qapi/qom.json).
+               Applying to a node requires blockdev 'throttle' driver graph.
+    args: {qom-type: throttle-group, limits: {bps-write: 1048576}}
+    expect: write throughput clamped (perf degradation fault)
+    ready: "schema-verified; live ack pending blockdev-graph setup"
+
+  # ---- 5. out-of-band channel ---------------------------------------------
+  ltpi_link_down:
+    category: oob
+    device: soc.ltpi-ctrl
+    mechanism: QMP/qom-set link-down (local patch P2, implemented)
+    args: {path: /machine/soc/ltpi-ctrl[0], property: link-down, value: true}
+    expect: LTPI link-management register reports link-down; BMC OOB link state machine reacts
+    ready: patch-P2-implemented   # hw/misc/aspeed_ltpi.c (pending build verification)
+
+  peci_host_temp_fault:
+    category: oob
+    device: aspeed-peci
+    mechanism: QMP/qom-set host-lost / temp-fault (patch P4, implemented)
+    args: {path: /machine/soc/peci, property: temp-fault, value: true}
+    expect: host-lost -> PECI commands never complete (guest timeout);
+            temp-fault -> commands complete with error completion code
+    ready: "patch-P4-implemented, device-level verified on ast2600-evb
+            2026-08-19; AST2700 PECI wiring is datasheet-dependent (SoC
+            currently instantiates no PECI device - upstream gap)"

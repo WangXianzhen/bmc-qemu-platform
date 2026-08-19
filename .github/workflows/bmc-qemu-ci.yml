@@ -1,0 +1,33 @@
+# BMC-QEMU-CI: build + fault injection + perf regression gate for the
+# AST2700 A2 BMC verification platform.
+#
+# Runs on any push/PR to the repo (or manually). Full pipeline:
+#   1. build QEMU master + local fault-injection patches (aarch64-softmmu)
+#   2. control-plane integration checks
+#   3. boot AST2700 A2 + OpenBMC SDK v11.03, run functional/fault pytest suite
+#   4. performance regression gate vs faultinject/baseline.json
+name: BMC-QEMU-CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: bmc-qemu-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bmc-platform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run BMC platform CI (build + fault injection + perf gate)
+        run: bash faultinject/ci/run_ci_linux.sh
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          # baseline lives in the repo so regressions gate on commit diffs
+          BASELINE: ${{ github.workspace }}/faultinject/baseline.json

@@ -1,0 +1,20 @@
+# vendored / build artifacts (not part of this repo)
+# QEMU source clone: CI clones fresh and applies faultinject/patches/
+qemu-master/
+build-mingw/
+build-ci/
+images/
+.tools/
+*.log
+err*.txt
+nvme.img
+perf-console.log
+ast2700-console.log
+
+# python
+__pycache__/
+*.pyc
+
+# transient perf outputs (baseline lives in faultinject/)
+/result.json
+/baseline.json
