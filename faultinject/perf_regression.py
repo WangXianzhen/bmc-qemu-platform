@@ -122,8 +122,17 @@ def redfish_latency(n=20):
 
 
 def compare(result, baseline, tol):
+    """Gate ONLY on host-independent deterministic metrics.
+
+    boot_wall_s is recorded for reference but excluded from the gate: it
+    depends on the CI runner's CPU speed and would spuriously fail when the
+    baseline was measured on a different host. tb_count / gen_code_size are
+    deterministic (same QEMU + image + icount config -> same values).
+    """
+    gate_keys = ("tb_count", "gen_code_size")
     regressions = []
-    for key, val in result.items():
+    for key in gate_keys:
+        val = result.get(key)
         if val is None or key not in baseline or baseline[key] is None:
             continue
         base = baseline[key]
