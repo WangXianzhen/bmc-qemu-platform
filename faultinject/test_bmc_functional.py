@@ -66,7 +66,7 @@ class Console:
                     f"tail:\n{seen[-2000:]}")
 
     def exec_cmd(self, cmd, expect, timeout=60):
-        self.proc.stdin.write(cmd + "\n")
+        self.proc.stdin.write((cmd + "\n").encode())
         self.proc.stdin.flush()
         return self.wait_for(expect, timeout=timeout)
 
@@ -130,10 +130,14 @@ def test_sensor_fault_injection(bmc):
 
 
 def test_psu_fault_injection(bmc):
-    """psu0 (adm1272): vout drop -> guest PMBus readback drops."""
+    """psu0 (adm1272): vout drop -> guest PMBus readback drops.
+
+    adm1272 applies a scaling coefficient to vin/vout/iout, so compare with
+    tolerance; the fault assertion is vout == 0 after the power-loss set."""
     qmp = bmc["qmp"]
     qmp.qom_set("/machine/peripheral/psu0", "vout", 12000)   # 12 V nominal
-    assert qmp.qom_get("/machine/peripheral/psu0", "vout") == 12000
+    v = qmp.qom_get("/machine/peripheral/psu0", "vout")
+    assert abs(v - 12000) <= 12000 * 0.02, f"vout readback {v} out of tolerance"
     qmp.qom_set("/machine/peripheral/psu0", "vout", 0)       # power-loss fault
     assert qmp.qom_get("/machine/peripheral/psu0", "vout") == 0
 
