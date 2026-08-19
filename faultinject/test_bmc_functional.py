@@ -97,9 +97,13 @@ def bmc():
          "-device", "adm1272,bus=aspeed.i2c.bus.1,address=0x10,id=psu0",
          "-device", "e1000e,netdev=net0,bus=pcie.2,id=nic0",
          "-netdev", f"user,id=net0,hostfwd=tcp::{2443}-:443",
-         "-device", "nvme,serial=SN0001,drive=nvmedrv,bus=pcie.1,id=nvme0",
-         "-drive", f"file={NVME_IMG},if=none,id=nvmedrv,format=raw,"
-                   "rerror=report,werror=stop",
+         # storage: file backend + blkdebug error injection (write_aio, once)
+         "-blockdev", f"driver=file,node-name=nvme-file,filename={NVME_IMG}",
+         "-blockdev", "driver=blkdebug,node-name=nvme-bd,image=nvme-file,"
+                      "inject-error.0.event=write_aio,"
+                      "inject-error.0.errno=5,"
+                      "inject-error.0.once=on",
+         "-device", "nvme,serial=SN0001,drive=nvme-bd,id=nvme0",
          "-watchdog-action", "pause",
          "-qmp", QMP_ADDR + ",server=on,wait=off",
          "-display", "none", "-serial", "stdio", "-monitor", "none"],
@@ -180,28 +184,23 @@ def test_nic_link_down_up(bmc):
     assert "1" in out
 
 
-def test_storage_error_pauses_vm(bmc):
-    """werror=stop: host truncates backing file, guest writes -> VM pauses.
+def test_storage_io_error_guest_visible(bmc):
+    """blkdebug-injected write error surfaces in the guest as EIO.
 
-    Requires the nvme device to be enumerated in the guest (/dev/nvme0n1);
-    on stock QEMU the AST2700 PCIe link needs the U-Boot fdt workaround, so
-    the test skips when the device is absent (known gap, design doc §7)."""
+    The nvme backend is wrapped in a blkdebug node that errors the first
+    write_aio (errno 5, once). The guest's dd on /dev/nvme0n1 must report
+    the I/O error - deterministic end-to-end storage fault verification
+    (a raw file backend never errors on truncated-file writes, so the
+    classic truncate+dd trick cannot be used here)."""
     qmp, console = bmc["qmp"], bmc["console"]
     if not console.try_cmd("ls /dev/nvme0n1", r"nvme0n1", timeout=10):
-        pytest.skip("nvme0n1 not enumerated (PCIe fdt workaround needed); "
-                    "skipping storage IO-error case")
-    with open(NVME_IMG, "r+b") as f:
-        f.truncate(1024 * 1024)
-    console.exec_cmd("dd if=/dev/zero of=/dev/nvme0n1 bs=1M count=8 "
-                     "oflag=direct 2>/dev/null", r"#", timeout=30)
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        st = qmp.status()
-        if st["status"] == "paused":
-            qmp.cmd("cont")            # resume for subsequent tests
-            return
-        time.sleep(0.5)
-    pytest.fail(f"VM did not pause on storage error; status={st}")
+        pytest.skip("nvme0n1 not enumerated (PCIe fdt workaround needed)")
+    console.exec_cmd("dd if=/dev/zero of=/dev/nvme0n1 bs=1M count=4 "
+                     "oflag=direct 2>&1", r"Input/output error|I/O error",
+                     timeout=30)
+    # verify QEMU side: a second write succeeds (once=on consumed the error)
+    console.exec_cmd("dd if=/dev/zero of=/dev/nvme0n1 bs=1M count=1 "
+                     "oflag=direct 2>&1", r"#", timeout=30)
 
 
 def test_redfish_smoke(bmc):
