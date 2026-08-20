@@ -151,7 +151,7 @@ def bmc():
                       "inject-error.0.event=write_aio,"
                       "inject-error.0.errno=5,"
                       "inject-error.0.once=on",
-         "-device", "nvme,serial=SN0001,drive=nvme-bd,id=nvme0",
+         "-device", "nvme,serial=SN0001,drive=nvme-bd,bus=pcie.2,id=nvme0",
          "-watchdog-action", "pause",
          "-qmp", QMP_ADDR + ",server=on,wait=off",
          "-chardev", f"socket,id=console0,host=127.0.0.1,port={CONSOLE_PORT},"
@@ -183,7 +183,25 @@ def bmc():
                 'setenv bootargs "${bootargs} cryptomgr.notests=1"',
                 r"=>", timeout=20)
             stop_spam.set()
-            console.try_cmd("boot", r"Starting kernel|login:", timeout=600)
+            # PCIe2 fdt workaround (the official AST2700 test sequence) so
+            # PCIe devices (e1000e/nvme on pcie.2) are visible to the guest.
+            # Fall back to plain `boot` if the sequence fails.
+            pcie_ok = (console.try_cmd("cp 100420000 403000000 900000",
+                                       r"=>", timeout=30)
+                       and console.try_cmd("bootm start 403000000",
+                                           r"=>", timeout=30)
+                       and console.try_cmd("bootm loados", r"=>", timeout=30)
+                       and console.try_cmd("bootm ramdisk", r"=>", timeout=30)
+                       and console.try_cmd("bootm prep", r"=>", timeout=30)
+                       and console.try_cmd(
+                           'fdt set /soc@14000000/pcie@140d0000 status "okay"',
+                           r"=>", timeout=30)
+                       and console.try_cmd("bootm go",
+                                           r"Starting kernel|login:",
+                                           timeout=600))
+            if not pcie_ok:
+                console.try_cmd("boot", r"Starting kernel|login:",
+                                timeout=600)
         else:
             stop_spam.set()
         console.wait_for(r"login:", timeout=600)   # SDK v11.03 boots to login
