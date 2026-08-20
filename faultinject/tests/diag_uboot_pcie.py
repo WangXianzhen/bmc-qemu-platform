@@ -182,9 +182,14 @@ def main():
         log(f"  pci 0002:xx: {bool(re.search(r'0002:[0-9a-f:]+', full()))}")
         log(f"  pci tail: {full()[-400:]!r}")
 
-        con.sock.sendall(b"ls /dev/nvme0n1\n")
-        con.wait_for(r"root@", timeout=20)
-        log(f"  nvme0n1 present: {'nvme0n1' in full().split('ls /dev/nvme0n1')[-1]}")
+        con.sock.sendall(b"ls /dev/nvme0n1; echo LS_DONE=$?\n")
+        con.wait_for(r"LS_DONE=\d+", timeout=20)
+        seg = full().split("LS_DONE=")[-1][:20]
+        log(f"  nvme0n1 present: {seg.startswith('0')} (ls rc={seg.strip()!r})")
+
+        con.sock.sendall(b"ls /sys/bus/pci/devices/; echo PCI_END\n")
+        con.wait_for(r"PCI_END", timeout=20)
+        log(f"  pci list: {full().split('PCI_END')[0][-300:]!r}")
 
         con.sock.sendall(b"ls /sys/class/net/\n")
         con.wait_for(r"root@", timeout=20)

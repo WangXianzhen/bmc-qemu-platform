@@ -271,28 +271,33 @@ def test_storage_io_error_guest_visible(bmc):
     c1 = console.read()
     # Poll for the nvme device: PCIe probe may finish after login on slow
     # runners, or miss the link entirely (guest-side rescan re-probes).
-    deadline = time.time() + 90
+    deadline = time.time() + 120
     present = False
-    tries = 0
     while time.time() < deadline:
         ls_out = console.try_cmd_text("ls /dev/nvme0n1; echo LS_DONE=$?",
                                       r"LS_DONE=\d+", timeout=15)
         if ls_out and re.search(r"LS_DONE=0", ls_out):
             present = True
             break
-        tries += 1
-        if tries == 2:
-            # Force a guest-side PCI rescan to recover a missed probe race
-            console.try_cmd("echo 1 > /sys/bus/pci/rescan 2>/dev/null",
-                            r"#", timeout=15)
         time.sleep(3)
     if not present:
-        console.try_cmd("ls /sys/bus/pci/devices/ 2>&1; echo PCI_LS",
-                        r"PCI_LS", timeout=15)
-        pci = console.read().split("PCI_LS")[-1][-400:]
+        # Diagnostics: PCI devices ARE the ground truth (block device may lag
+        # behind the PCI probe on slow TCG runners), so list them directly
+        # (not via a trailing marker - the earlier split bug hid them) plus
+        # guest uptime and the nvme/pci kernel messages.
+        console.try_cmd("ls /sys/bus/pci/devices/; echo PCI_END",
+                        r"PCI_END", timeout=15)
+        seg = console.read().split("PCI_END")[0][-400:]
+        console.try_cmd("cat /proc/uptime; echo UP_END", r"UP_END",
+                        timeout=15)
+        up = console.read().split("UP_END")[0][-200:]
+        console.try_cmd("dmesg | grep -iE 'nvme|pcie|0002:' | tail -30; "
+                        "echo DM_END", r"DM_END", timeout=20)
+        dmesg = console.read().split("DM_END")[0][-2500:]
         tail = console.read()[-1200:]
-        pytest.skip(f"nvme0n1 not enumerated (90s poll); "
-                    f"uboot={bmc.get('uboot')}; pci={pci.strip()!r}; "
+        pytest.skip(f"nvme0n1 not enumerated (120s poll); "
+                    f"uboot={bmc.get('uboot')}; pci={seg.strip()!r}; "
+                    f"uptime={up.strip()!r}; dmesg:\n{dmesg}\n"
                     f"console tail: {tail!r}")
 
     # Re-arm note: blockdev-reopen cannot change inject-error rules, so the
