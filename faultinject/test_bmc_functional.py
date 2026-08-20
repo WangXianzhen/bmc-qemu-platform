@@ -94,6 +94,19 @@ class Console:
 @pytest.fixture(scope="module")
 def bmc():
     """Launch the DUT once per module; teardown via QMP quit + kill."""
+
+    def _uboot_newline_spam(proc, start, seconds):
+        """Send a newline every second during the U-Boot phase to interrupt
+        autoboot (its countdown is only ~2s; a fixed wait can miss it)."""
+        time.sleep(start)
+        for _ in range(seconds):
+            try:
+                proc.stdin.write(b"\n")
+                proc.stdin.flush()
+            except Exception:
+                return
+            time.sleep(1)
+
     if os.path.exists(QMP_SOCK):
         os.unlink(QMP_SOCK)
     if os.path.exists(NVME_TRACE):
@@ -129,18 +142,22 @@ def bmc():
         console = Console(proc)
 
         # QEMU's aspeed HACE emulation supports hash only (HMAC is a TODO,
-        # docs/system/arm/aspeed.rst), so the kernel hmac-sha512 self-tests
-        # fail and can wedge the boot (observed rc=-22 loop). Disable crypto
-        # self-tests via U-Boot bootargs, mirroring QEMU's own functional
-        # tests (cryptomgr.notests=1). Fall back to plain login wait if the
-        # U-Boot interaction is missed.
-        if console.wait_for(r"Hit any key to stop autoboot", timeout=420):
+        # docs/system/arm/aspeed.rst), so kernel crypto self-tests (hmac/
+        # cbc-aes) can crash the boot (rc=-22 oops). Disable them via U-Boot
+        # bootargs (cryptomgr.notests=1), mirroring QEMU's own functional
+        # tests. The autoboot countdown is only ~2s, so a background newline
+        # spam interrupts it reliably; fall back to a plain login wait if the
+        # U-Boot prompt is missed.
+        threading.Thread(target=_uboot_newline_spam, args=(proc, 15, 120),
+                         daemon=True).start()
+        if console.wait_for(r"Hit any key to stop autoboot", timeout=300):
             proc.stdin.write(b"\n")
             proc.stdin.flush()
-            if console.try_cmd(
-                    'setenv bootargs "${bootargs} cryptomgr.notests=1"',
-                    r"=>", timeout=20):
-                console.try_cmd("boot", r"Starting kernel|login:", timeout=600)
+        if console.wait_for(r"=>", timeout=30):   # at the U-Boot prompt
+            console.try_cmd(
+                'setenv bootargs "${bootargs} cryptomgr.notests=1"',
+                r"=>", timeout=20)
+            console.try_cmd("boot", r"Starting kernel|login:", timeout=600)
         console.wait_for(r"login:", timeout=600)   # SDK v11.03 boots to login
         yield {"qmp": qmp, "console": console}
         qmp.close()
