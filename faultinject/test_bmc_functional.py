@@ -46,7 +46,10 @@ class Console:
         self._th.start()
 
     def _reader(self):
-        for chunk in iter(lambda: self.proc.stdout.read(1), b""):
+        # Read in large chunks: a 1-byte reader lets the stdout pipe fill
+        # (boot + service logs) and QEMU's serial write blocks, wedging the
+        # guest getty so later console commands get no reply.
+        for chunk in iter(lambda: self.proc.stdout.read(65536), b""):
             with self._lock:
                 self._buf.append(chunk.decode("utf-8", errors="replace"))
 
