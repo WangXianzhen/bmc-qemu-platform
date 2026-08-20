@@ -127,6 +127,20 @@ def bmc():
         qmp = QMPClient(QMP_ADDR)
         qmp.connect()
         console = Console(proc)
+
+        # QEMU's aspeed HACE emulation supports hash only (HMAC is a TODO,
+        # docs/system/arm/aspeed.rst), so the kernel hmac-sha512 self-tests
+        # fail and can wedge the boot (observed rc=-22 loop). Disable crypto
+        # self-tests via U-Boot bootargs, mirroring QEMU's own functional
+        # tests (cryptomgr.notests=1). Fall back to plain login wait if the
+        # U-Boot interaction is missed.
+        if console.wait_for(r"Hit any key to stop autoboot", timeout=420):
+            proc.stdin.write(b"\n")
+            proc.stdin.flush()
+            if console.try_cmd(
+                    'setenv bootargs "${bootargs} cryptomgr.notests=1"',
+                    r"=>", timeout=20):
+                console.try_cmd("boot", r"Starting kernel|login:", timeout=600)
         console.wait_for(r"login:", timeout=600)   # SDK v11.03 boots to login
         yield {"qmp": qmp, "console": console}
         qmp.close()
