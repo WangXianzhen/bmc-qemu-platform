@@ -32,26 +32,41 @@ QMP_ADDR = os.environ.get(
 NVME_IMG = os.environ.get("NVME_IMG", "/tmp/ast2700-nvme-test.img")
 REDFISH_URL = "http://127.0.0.1:2443/redfish/v1"   # hostfwd from fixture
 NVME_TRACE = "/tmp/ast2700-nvme-trace.log"          # -D trace file
+CONSOLE_PORT = 4567                                  # socket chardev console
 
 
 class Console:
-    """Serial console via QEMU stdio (-serial stdio): read from stdout pipe
-    (reader thread), send commands to stdin pipe."""
+    """Serial console over a QEMU socket chardev (like QEMU's own
+    functional tests): -chardev socket,server=on + -serial chardev.
+    stdio pipes do NOT deliver input to the guest on all platforms."""
 
-    def __init__(self, proc):
-        self.proc = proc
+    def __init__(self, port=CONSOLE_PORT, timeout=300):
         self._buf = []
         self._lock = threading.Lock()
+        deadline = time.time() + timeout
+        while True:
+            try:
+                self.sock = socket.create_connection(("127.0.0.1", port),
+                                                     timeout=5)
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise RuntimeError("console socket not accepting "
+                                       f"127.0.0.1:{port}")
+                time.sleep(0.5)
         self._th = threading.Thread(target=self._reader, daemon=True)
         self._th.start()
 
     def _reader(self):
-        # Read in large chunks: a 1-byte reader lets the stdout pipe fill
-        # (boot + service logs) and QEMU's serial write blocks, wedging the
-        # guest getty so later console commands get no reply.
-        for chunk in iter(lambda: self.proc.stdout.read(65536), b""):
+        while True:
+            try:
+                data = self.sock.recv(65536)
+            except OSError:
+                return
+            if not data:
+                return
             with self._lock:
-                self._buf.append(chunk.decode("utf-8", errors="replace"))
+                self._buf.append(data.decode("utf-8", errors="replace"))
 
     def read(self):
         with self._lock:
@@ -69,9 +84,12 @@ class Console:
         pytest.fail(f"console pattern {pattern!r} not seen in {timeout}s; "
                     f"tail:\n{seen[-2000:]}")
 
+    def send(self, text):
+        self.sock.sendall(text.encode())
+
     def exec_cmd(self, cmd, expect, timeout=60):
-        self.proc.stdin.write((cmd + "\n").encode())
-        self.proc.stdin.flush()
+        self.send(cmd + "\n")
+        return self.wait_for(expect, timeout=timeout)
         return self.wait_for(expect, timeout=timeout)
 
     def try_cmd(self, cmd, expect, timeout=20):
@@ -95,14 +113,13 @@ class Console:
 def bmc():
     """Launch the DUT once per module; teardown via QMP quit + kill."""
 
-    def _uboot_newline_spam(proc, start, seconds):
+    def _uboot_newline_spam(console, start, seconds):
         """Send a newline every second during the U-Boot phase to interrupt
         autoboot (its countdown is only ~2s; a fixed wait can miss it)."""
         time.sleep(start)
         for _ in range(seconds):
             try:
-                proc.stdin.write(b"\n")
-                proc.stdin.flush()
+                console.send("\n")
             except Exception:
                 return
             time.sleep(1)
@@ -133,13 +150,16 @@ def bmc():
          "-device", "nvme,serial=SN0001,drive=nvme-bd,id=nvme0",
          "-watchdog-action", "pause",
          "-qmp", QMP_ADDR + ",server=on,wait=off",
-         "-display", "none", "-serial", "stdio", "-monitor", "none"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+         "-chardev", f"socket,id=console0,host=127.0.0.1,port={CONSOLE_PORT},"
+                     "server=on,wait=off",
+         "-serial", "chardev:console0",
+         "-display", "none", "-monitor", "none"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL)
     try:
         qmp = QMPClient(QMP_ADDR)
         qmp.connect()
-        console = Console(proc)
+        console = Console()
 
         # QEMU's aspeed HACE emulation supports hash only (HMAC is a TODO,
         # docs/system/arm/aspeed.rst), so kernel crypto self-tests (hmac/
@@ -148,11 +168,10 @@ def bmc():
         # tests. The autoboot countdown is only ~2s, so a background newline
         # spam interrupts it reliably; fall back to a plain login wait if the
         # U-Boot prompt is missed.
-        threading.Thread(target=_uboot_newline_spam, args=(proc, 15, 120),
+        threading.Thread(target=_uboot_newline_spam, args=(console, 15, 120),
                          daemon=True).start()
         if console.wait_for(r"Hit any key to stop autoboot", timeout=300):
-            proc.stdin.write(b"\n")
-            proc.stdin.flush()
+            console.send("\n")
         if console.wait_for(r"=>", timeout=30):   # at the U-Boot prompt
             console.try_cmd(
                 'setenv bootargs "${bootargs} cryptomgr.notests=1"',
