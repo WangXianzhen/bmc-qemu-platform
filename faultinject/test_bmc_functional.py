@@ -435,6 +435,118 @@ def test_redfish_smoke(bmc):
     pytest.skip("Redfish endpoint not reachable on this image (bmcweb?)")
 
 
+# -- Redfish deep smoke (auth + resource tree) -----------------------------
+# bmcweb in this SDK is HTTPS-only with a self-signed cert and requires
+# Basic auth on everything except the ServiceRoot. Helpers below share the
+# eth0 bring-up with test_redfish_smoke (idempotent re-apply).
+
+REDFISH_HTTPS = REDFISH_URL.replace("http://", "https://")
+REDFISH_BASE = "https://127.0.0.1:2443"   # hostfwd 2443 -> guest 443
+
+
+def _redfish_ctx():
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _redfish_get(url, user="root", password="0penBmc", timeout=8):
+    """HTTPS GET with Basic auth; returns (status, parsed JSON body)."""
+    import base64
+    import json
+    import urllib.error
+    req = urllib.request.Request(url)
+    req.add_header("Authorization",
+                   "Basic " + base64.b64encode(
+                       f"{user}:{password}".encode()).decode())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout,
+                                    context=_redfish_ctx()) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, None
+
+
+def _redfish_eth0(console):
+    """Re-apply eth0 static IP (idempotent); True when usable."""
+    if not console.try_cmd("ip link set eth0 up", r"#"):
+        return False
+    console.try_cmd("ip addr flush dev eth0", r"#")
+    return console.try_cmd("ip addr add 10.0.2.15/24 dev eth0", r"#")
+
+
+def test_redfish_basic_auth(bmc):
+    """bmcweb access control: anonymous 401, valid Basic 200, bad creds 401.
+
+    Only the ServiceRoot is unauthenticated (verified by test_redfish_smoke);
+    every managed resource requires credentials. root/0penBmc is the SDK
+    default account (same as the serial console login)."""
+    import urllib.error
+    console = bmc["console"]
+    if not _redfish_eth0(console):
+        pytest.skip("eth0 not usable")
+    # anonymous -> 401
+    req = urllib.request.Request(REDFISH_HTTPS + "/Systems")
+    try:
+        with urllib.request.urlopen(req, timeout=8,
+                                    context=_redfish_ctx()) as r:
+            pytest.fail(f"anonymous /Systems returned {r.status}, want 401")
+    except urllib.error.HTTPError as e:
+        assert e.code == 401
+    except OSError as e:
+        pytest.skip(f"Redfish not reachable: {e}")
+    # valid credentials -> 200 (collection JSON)
+    st, body = _redfish_get(REDFISH_HTTPS + "/Systems")
+    assert st == 200, f"/Systems with valid creds: {st}"
+    assert body and body.get("Members"), f"/Systems body: {body}"
+    # bad password -> 401
+    st2, _ = _redfish_get(REDFISH_HTTPS + "/Systems", user="root",
+                          password="wrong-password")
+    assert st2 == 401, f"bad password: {st2}"
+
+
+def test_redfish_systems_resource(bmc):
+    """ComputerSystem resource: Id/Status present (auth).
+
+    PowerState is NOT asserted: this SDK's bmcweb models the BMC itself
+    (no managed host power rail), so PowerState is null here."""
+    console = bmc["console"]
+    if not _redfish_eth0(console):
+        pytest.skip("eth0 not usable")
+    st, body = _redfish_get(REDFISH_HTTPS + "/Systems/system")
+    if st != 200:
+        pytest.skip(f"/Systems/system unavailable ({st})")
+    assert body["Id"], body
+    status = body.get("Status", {})
+    assert status.get("State"), body
+    assert status.get("Health"), body
+
+
+def test_redfish_sensors_collection(bmc):
+    """Chassis Sensors collection lists fan pwm/tach members (auth).
+
+    The SDK exposes sensors under /Chassis/AST2700_EVB/Sensors (fanpwm_* /
+    fantach_* members); the legacy /Thermal endpoint is gone in this build.
+    This also gives the platform a stable anchor for the future QMP-fault ->
+    Redfish-reading cross-check."""
+    console = bmc["console"]
+    if not _redfish_eth0(console):
+        pytest.skip("eth0 not usable")
+    st, body = _redfish_get(REDFISH_HTTPS + "/Chassis/AST2700_EVB/Sensors")
+    if st != 200:
+        pytest.skip(f"Sensors collection unavailable ({st})")
+    members = [m.get("@odata.id", "") for m in body.get("Members", [])]
+    assert members, body
+    assert any("fanpwm" in m or "fantach" in m for m in members), members
+    # follow the first member to prove the resource is readable (members[]
+    # are absolute /redfish/... paths; prepend only the host)
+    st2, detail = _redfish_get(REDFISH_BASE + members[0])
+    assert st2 == 200, f"member {members[0]}: {st2}"
+    assert detail and detail.get("Id"), detail
+
+
 def test_watchdog_action(bmc):
     """watchdog-set-action QMP round-trip."""
     qmp = bmc["qmp"]
