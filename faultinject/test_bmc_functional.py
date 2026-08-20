@@ -114,11 +114,14 @@ class Console:
 def bmc():
     """Launch the DUT once per module; teardown via QMP quit + kill."""
 
-    def _uboot_newline_spam(console, start, seconds):
+    def _uboot_newline_spam(console, start, seconds, stop):
         """Send a newline every second during the U-Boot phase to interrupt
-        autoboot (its countdown is only ~2s; a fixed wait can miss it)."""
+        autoboot (its countdown is only ~2s; a fixed wait can miss it).
+        Stops on the stop event so it never hits the login prompt."""
         time.sleep(start)
         for _ in range(seconds):
+            if stop.is_set():
+                return
             try:
                 console.send("\n")
             except Exception:
@@ -167,9 +170,11 @@ def bmc():
         # cbc-aes) can crash the boot (rc=-22 oops). Disable them via U-Boot
         # bootargs (cryptomgr.notests=1), mirroring QEMU's own functional
         # tests. The autoboot countdown is only ~2s, so a background newline
-        # spam interrupts it reliably; fall back to a plain login wait if the
-        # U-Boot prompt is missed.
-        threading.Thread(target=_uboot_newline_spam, args=(console, 15, 120),
+        # spam interrupts it reliably; the spam is stopped once U-Boot is
+        # handled so it can never hit the login prompt.
+        stop_spam = threading.Event()
+        threading.Thread(target=_uboot_newline_spam,
+                         args=(console, 15, 120, stop_spam),
                          daemon=True).start()
         if console.wait_for(r"Hit any key to stop autoboot", timeout=300):
             console.send("\n")
@@ -177,8 +182,16 @@ def bmc():
             console.try_cmd(
                 'setenv bootargs "${bootargs} cryptomgr.notests=1"',
                 r"=>", timeout=20)
+            stop_spam.set()
             console.try_cmd("boot", r"Starting kernel|login:", timeout=600)
+        else:
+            stop_spam.set()
         console.wait_for(r"login:", timeout=600)   # SDK v11.03 boots to login
+
+        # Log in so the tests get a real shell (without login, every
+        # console command just hits the login prompt -> 'Login incorrect').
+        console.exec_cmd("root", r"Password:", timeout=30)
+        console.exec_cmd("0penBmc", r"root@", timeout=30)
         yield {"qmp": qmp, "console": console}
         qmp.close()
     finally:
