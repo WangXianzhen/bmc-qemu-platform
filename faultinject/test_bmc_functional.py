@@ -207,24 +207,25 @@ def test_storage_io_error_guest_visible(bmc):
     qmp, console = bmc["qmp"], bmc["console"]
     if not console.try_cmd("ls /dev/nvme0n1", r"nvme0n1", timeout=10):
         pytest.skip("nvme0n1 not enumerated (PCIe fdt workaround needed)")
+    off = os.path.getsize(NVME_TRACE) if os.path.exists(NVME_TRACE) else 0
     txt = console.try_cmd_text("timeout 10 dd if=/dev/zero of=/dev/nvme0n1 "
                                "bs=1M count=4 2>&1; echo RC=$?",
                                r"RC=\d+", timeout=45)
-    tail = console.read()[-1500:]
     trace_tail = ""
     try:
         with open(NVME_TRACE, errors="replace") as f:
-            trace_tail = "".join(f.readlines()[-25:])
-    except FileNotFoundError:
+            f.seek(off)
+            trace_tail = f.read()[-3000:]
+    except Exception:
         pass
     if txt is None:
         pytest.skip(f"console did not return after dd (guest hang); "
-                    f"nvme trace tail:\n{trace_tail}")
+                    f"nvme trace during dd:\n{trace_tail}")
     if "Input/output error" in txt or "I/O error" in txt:
         return                       # PASS: guest observed the injected EIO
     if "RC=124" in txt:
         pytest.skip(f"dd timed out on blkdebug error (nvme retry loop); "
-                    f"nvme trace tail:\n{trace_tail}")
+                    f"nvme trace during dd:\n{trace_tail}")
     pytest.fail(f"storage write did not error as expected; output:\n{txt[-500:]}")
 
 
