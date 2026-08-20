@@ -206,14 +206,15 @@ def test_storage_io_error_guest_visible(bmc):
     txt = console.try_cmd_text("timeout 10 dd if=/dev/zero of=/dev/nvme0n1 "
                                "bs=1M count=4 2>&1; echo RC=$?",
                                r"RC=\d+", timeout=45)
+    tail = console.read()[-1500:]
     if txt is None:
-        pytest.skip("console did not return after dd (guest hang)")
+        pytest.skip(f"console did not return after dd (guest hang); "
+                    f"console tail: {tail[-900:]!r}")
     if "Input/output error" in txt or "I/O error" in txt:
         return                       # PASS: guest observed the injected EIO
     if "RC=124" in txt:
-        pytest.skip("dd timed out on blkdebug error (nvme driver retry loop); "
-                    "block-layer fault injected, guest-visible completion "
-                    "needs nvme error-handling follow-up")
+        pytest.skip("dd timed out on blkdebug error (nvme retry loop); "
+                    f"console tail: {tail[-900:]!r}")
     pytest.fail(f"storage write did not error as expected; output:\n{txt[-500:]}")
 
 

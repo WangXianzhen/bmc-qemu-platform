@@ -86,7 +86,7 @@ $PY "$WORKSPACE/faultinject/dual/ipmb_bridge.py" --self-test
 log "functional/fault-injection pytest suite (boots AST2700 A2)"
 export QEMU="$BUILD_DIR/qemu-system-aarch64"
 export IMG="$IMG_DIR/image-bmc"
-$PY -m pytest "$WORKSPACE/faultinject/test_bmc_functional.py" -v
+$PY -m pytest -rs "$WORKSPACE/faultinject/test_bmc_functional.py" -v
 
 # 7) performance regression gate --------------------------------------------
 if [ "${SKIP_PERF:-0}" != "1" ]; then
