@@ -35,6 +35,8 @@ REDFISH_URL = "http://127.0.0.1:2443/redfish/v1"   # hostfwd from fixture
 NVME_TRACE = "/tmp/ast2700-nvme-trace.log"          # -D trace file
 QEMU_STDERR = os.environ.get("QEMU_STDERR",
                              "/tmp/ast2700-qemu-stderr.log")
+PC_BIOS = os.environ.get(
+    "PC_BIOS", os.path.join(REPO, "qemu-master", "pc-bios"))
 CONSOLE_PORT = 4567                                  # socket chardev console
 
 
@@ -158,6 +160,7 @@ def bmc():
          "-device", "nvme,serial=SN0001,drive=nvme-bd,bus=pcie.2,id=nvme0",
          "-watchdog-action", "pause",
          "-qmp", QMP_ADDR + ",server=on,wait=off",
+         "-L", PC_BIOS,
          "-chardev", f"socket,id=console0,host=127.0.0.1,port={CONSOLE_PORT},"
                      "server=on,wait=off",
          "-serial", "chardev:console0",
@@ -283,17 +286,19 @@ def test_storage_io_error_guest_visible(bmc):
     if not present:
         # Diagnostics: PCI devices ARE the ground truth (block device may lag
         # behind the PCI probe on slow TCG runners), so list them directly
-        # (not via a trailing marker - the earlier split bug hid them) plus
-        # guest uptime and the nvme/pci kernel messages.
-        console.try_cmd("ls /sys/bus/pci/devices/; echo PCI_END",
-                        r"PCI_END", timeout=15)
-        seg = console.read().split("PCI_END")[0][-400:]
-        console.try_cmd("cat /proc/uptime; echo UP_END", r"UP_END",
+        # plus guest uptime and the nvme/pci kernel messages. Note: the
+        # marker must be `END: $?` (a digit) - a bare literal like "PCI_END"
+        # is matched by wait_for() against the *command echo*, which fires
+        # before the command has even run.
+        console.try_cmd("ls /sys/bus/pci/devices/; echo END: $?",
+                        r"END: \d+", timeout=15)
+        seg = console.read().split("END: ")[-1][:300]
+        console.try_cmd("cat /proc/uptime; echo END: $?", r"END: \d+",
                         timeout=15)
-        up = console.read().split("UP_END")[0][-200:]
-        console.try_cmd("dmesg | grep -iE 'nvme|pcie|0002:' | tail -30; "
-                        "echo DM_END", r"DM_END", timeout=20)
-        dmesg = console.read().split("DM_END")[0][-2500:]
+        up = console.read().split("END: ")[-1][:200]
+        console.try_cmd("dmesg | grep -iE 'nvme|pcie|0002:' | tail -40; "
+                        "echo END: $?", r"END: \d+", timeout=20)
+        dmesg = console.read().split("END: ")[-1][-2500:]
         tail = console.read()[-1200:]
         pytest.skip(f"nvme0n1 not enumerated (120s poll); "
                     f"uboot={bmc.get('uboot')}; pci={seg.strip()!r}; "
