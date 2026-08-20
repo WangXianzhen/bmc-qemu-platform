@@ -118,10 +118,13 @@ faults:
   block_io_error:
     category: storage
     device: nvmedrv
-    mechanism: werror=stop + host truncates/deletes backing file at runtime
-    args: {backend: nvme.img, action: truncate-to-1M}
-    expect: guest IO error -> VM pauses (query-status shows 'paused'); verify BMC logs
-    ready: yes
+    mechanism: blkdebug inject write_aio errno=5 once (fixture launches nvme
+               on a blkdebug node); guest dd must observe EIO
+    args: {blkdebug: {event: write_aio, errno: 5, once: on}}
+    expect: guest dd reports 'Input/output error' (requires patch P6 nvme DNR,
+            otherwise the nvme driver retries forever)
+    ready: "patch-P6-implemented, local verify in progress; CI pytest case
+            test_storage_io_error_guest_visible"
 
   storage_throttle:
     category: storage

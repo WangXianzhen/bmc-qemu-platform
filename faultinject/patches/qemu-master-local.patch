@@ -252,6 +252,33 @@ index f8fbaebee..6101473bc 100644
          .class_init = aspeed_2700_sdmc_class_init,
      }
  };
+diff --git a/hw/nvme/ctrl.c b/hw/nvme/ctrl.c
+index 4893cf7e7..90bd8a36e 100644
+--- a/hw/nvme/ctrl.c
++++ b/hw/nvme/ctrl.c
+@@ -2186,17 +2186,19 @@ void nvme_rw_complete_cb(void *opaque, int ret)
+ 
+         switch (req->cmd.opcode) {
+         case NVME_CMD_READ:
+-            req->status = NVME_UNRECOVERED_READ;
++            /* Local patch (fault-injection CI): set DNR so the Linux driver
++             * fails the command with EIO instead of retrying forever. */
++            req->status = NVME_UNRECOVERED_READ | NVME_DNR;
+             break;
+ 
+         case NVME_CMD_WRITE:
+         case NVME_CMD_WRITE_ZEROES:
+         case NVME_CMD_ZONE_APPEND:
+-            req->status = NVME_WRITE_FAULT;
++            req->status = NVME_WRITE_FAULT | NVME_DNR;
+             break;
+ 
+         default:
+-            req->status = NVME_INTERNAL_DEV_ERROR;
++            req->status = NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+             break;
+         }
+ 
 diff --git a/hw/sensor/max31785.c b/hw/sensor/max31785.c
 index 468858a60..80c8ee46e 100644
 --- a/hw/sensor/max31785.c

@@ -21,10 +21,12 @@ Notes: this is a test harness skeleton - the *real* wire protocol bridge
 import os
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from qmp_client import QMPClient  # noqa: E402
+import ipmb_bridge  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 QEMU_X86 = os.environ.get("QEMU_X86", os.path.join(REPO, "qemu-master", "build-mingw",
@@ -35,12 +37,19 @@ HOST_IMG = os.environ.get("HOST_IMG", "")          # x86 guest disk (qcow2)
 BMC_IMG = os.environ.get("BMC_IMG", "ast2700-default/image-bmc")
 HOST_QMP = os.environ.get("HOST_QMP", "tcp:127.0.0.1:4460")
 BMC_QMP = os.environ.get("BMC_QMP", "tcp:127.0.0.1:4461")
+BRIDGE_PORT = int(os.environ.get("BRIDGE_PORT", "9000"))
 
 
 def launch_host():
-    """x86 server guest with IPMI BMC emulation + MCE injectable."""
+    """x86 server guest with the external-BMC bridge as its IPMI BMC.
+
+    QEMU's ipmi-bmc-extern talks the OpenIPMI lanserv 'VM' protocol; the
+    IPMB bridge (ipmb_bridge.py) answers as the BMC, optionally forwarding
+    to the real BMC's ipmid socket. The guest kernel (ipmi_si/KCS) will
+    discover a healthy BMC and issue Get Device ID etc."""
     args = [QEMU_X86, "-machine", "q35", "-smp", "4", "-m", "4G",
-            "-device", "ipmi-bmc-sim,id=bmc0",
+            "-chardev", f"socket,id=ipmi0,host=127.0.0.1,port={BRIDGE_PORT}",
+            "-device", "ipmi-bmc-extern,id=bmc0,chardev=ipmi0",
             "-device", "isa-ipmi-kcs,bmc=bmc0",
             "-qmp", HOST_QMP + ",server=on,wait=off",
             "-display", "none"]
@@ -73,7 +82,17 @@ def bridge_host_mce_to_bmc(host, bmc):
 
 def main():
     procs = []
+    bridge = None
     try:
+        # IPMB bridge: answers the host guest's BMC (mock mode by default;
+        # pass --forward to relay to the real BMC's ipmid socket)
+        bridge = threading.Thread(
+            target=ipmb_bridge.serve,
+            args=(("127.0.0.1", BRIDGE_PORT), None, print),
+            daemon=True)
+        bridge.start()
+        time.sleep(0.5)
+
         print("launching host x86 guest ...")
         procs.append(launch_host())
         print("launching AST2700 BMC ...")

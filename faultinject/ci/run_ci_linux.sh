@@ -79,6 +79,9 @@ fi
 log "control-plane integration checks (fake QMP server)"
 $PY "$WORKSPACE/faultinject/tests/verify_control_plane.py"
 
+log "IPMB bridge codec self-test (VM protocol vectors)"
+$PY "$WORKSPACE/faultinject/dual/ipmb_bridge.py" --self-test
+
 # 6) functional + fault-injection suite -------------------------------------
 log "functional/fault-injection pytest suite (boots AST2700 A2)"
 export QEMU="$BUILD_DIR/qemu-system-aarch64"

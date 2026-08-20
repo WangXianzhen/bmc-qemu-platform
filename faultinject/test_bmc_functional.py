@@ -218,17 +218,19 @@ def test_storage_io_error_guest_visible(bmc):
 
 
 def test_redfish_smoke(bmc):
-    """Bring up the management NIC and probe Redfish via hostfwd.
+    """Bring up the management NIC (static IP on the user-net subnet) and
+    probe Redfish via hostfwd.
 
-    Skips when the NIC cannot get an IP (stock QEMU AST2700 PCIe2 needs the
-    U-Boot fdt workaround) or when this image has no Redfish endpoint."""
+    eth2 is present in the guest (verified by test_nic_link_down_up); DHCP
+    via udhcpc is not reliable on this image, so we assign the user-net
+    address statically. Skips when Redfish is not served by the image."""
     console = bmc["console"]
     if not console.try_cmd("ip link set eth2 up", r"#"):
         pytest.skip("eth2 not present (PCIe2 fdt workaround needed)")
-    console.try_cmd("udhcpc -i eth2 -t 3 -q 2>/dev/null", r"#")
-    if not console.try_cmd("ip addr show dev eth2", r"10\.0\.2\.15"):
-        pytest.skip("BMC NIC did not obtain an IP; skipping Redfish smoke")
-    deadline = time.time() + 20
+    console.try_cmd("ip addr flush dev eth2", r"#")
+    if not console.try_cmd("ip addr add 10.0.2.15/24 dev eth2", r"#"):
+        pytest.skip("could not assign IP to eth2")
+    deadline = time.time() + 25
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(REDFISH_URL, timeout=5) as r:
@@ -236,7 +238,7 @@ def test_redfish_smoke(bmc):
             return
         except Exception:
             time.sleep(1)
-    pytest.skip("Redfish endpoint not reachable on this image")
+    pytest.skip("Redfish endpoint not reachable on this image (bmcweb?)")
 
 
 def test_watchdog_action(bmc):

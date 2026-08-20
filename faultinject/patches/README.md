@@ -63,6 +63,15 @@
 
 - `inject-nmi`：`nmi_inject()`（hw/core/nmi.c:44）遍历 QOM 树找 `TYPE_NMI` 接口；AST2700 无该设备，且 Cortex-A35 模型无 FEAT_NMI（GICv3 `has-nmi` 仅在 TCG+aa64_nmi 时暴露，见 hw/arm/virt.c:1272）。**NMI 注入在 AST2700 上不可用**；替代：watchdog `pause`/`reset` 动作，或 P3 SError 注入。
 
+## P6 — nvme 块层错误完成路径补 DNR（✅ 已实现，本地验证中）
+
+| 项 | 值 |
+|---|---|
+| 文件 | `hw/nvme/ctrl.c`（`nvme_rw_complete_cb`） |
+| 问题 | 后端 IO 错误（如 blkdebug 注入）完成命令时状态 `NVME_WRITE_FAULT`/`NVME_UNRECOVERED_READ`/`NVME_INTERNAL_DEV_ERROR` **未置 DNR** → Linux nvme 驱动视为可重试 → 无限重试，guest dd 挂起（RC=124） |
+| 修复 | 三处状态均 `| NVME_DNR`（与 nvme 其他错误路径一致），驱动立即以 EIO 失败命令 |
+| 验证 | 本地 `verify_storage_eio.py`（blkdebug 注入 EIO，guest dd 应看到 Input/output error）；CI pytest `test_storage_io_error_guest_visible` 由 skip 转 pass |
+
 ## 待办（后续轮次）
 
 - 双 QEMU 联动拓扑（x86 host guest + BMC 互联，IPMB/PECI 桥）
