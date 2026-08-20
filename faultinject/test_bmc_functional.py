@@ -230,9 +230,14 @@ def bmc():
                     tail = f.read()[-1500:]
             except OSError:
                 pass
+            vms = ""
+            try:
+                vms = repr(qmp.status())
+            except BaseException:
+                pass
             pytest.fail(f"no login: after U-Boot sequence; uboot={uboot}; "
-                        f"console tail:\n{console.read()[-1500:]}\n"
-                        f"QEMU stderr tail:\n{tail}")
+                        f"vm_status={vms}; console tail:\n"
+                        f"{console.read()[-1500:]}\nQEMU stderr tail:\n{tail}")
 
         # Log in so the tests get a real shell (without login, every
         # console command just hits the login prompt -> 'Login incorrect').
