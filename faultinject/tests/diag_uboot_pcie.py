@@ -106,6 +106,11 @@ def main():
     args = [
         QEMU, "-machine", "ast2700-evb", "-smp", "4", "-m", "2G",
         "-drive", f"file={IMG},format=raw,if=mtd",
+        "-trace", "enable=pci_nvme_*", "-D", os.path.join(
+            os.path.dirname(LOG), "diag-nvme-trace.log"),
+        "-device", "tmp105,bus=aspeed.i2c.bus.1,address=0x4d,id=temp-mb",
+        "-device", "adm1272,bus=aspeed.i2c.bus.1,address=0x10,id=psu0",
+        "-watchdog-action", "pause",
         "-blockdev", f"driver=file,node-name=nvme-file,filename={NVME_IMG}",
         "-blockdev", "driver=blkdebug,node-name=nvme-bd,image=nvme-file,"
                      "inject-error.0.event=pwritev,"

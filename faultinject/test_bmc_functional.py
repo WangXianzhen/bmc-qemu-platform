@@ -267,8 +267,10 @@ def test_storage_io_error_guest_visible(bmc):
         console.try_cmd("ls /sys/bus/pci/devices/ 2>&1; echo PCI_LS",
                         r"PCI_LS", timeout=15)
         pci = console.read().split("PCI_LS")[-1][-400:]
+        tail = console.read()[-1200:]
         pytest.skip(f"nvme0n1 not enumerated (90s poll); "
-                    f"uboot={bmc.get('uboot')}; pci={pci.strip()!r}")
+                    f"uboot={bmc.get('uboot')}; pci={pci.strip()!r}; "
+                    f"console tail: {tail!r}")
 
     # Re-arm note: blockdev-reopen cannot change inject-error rules, so the
     # launch-time rule must use the event the write path actually emits:
