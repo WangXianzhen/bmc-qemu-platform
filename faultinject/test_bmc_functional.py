@@ -247,11 +247,23 @@ def test_storage_io_error_guest_visible(bmc):
         pytest.skip(f"guest shell not responsive; console delta: "
                     f"{console.read()[len(c0):][-800:]!r}")
     c1 = console.read()
-    ls_out = console.try_cmd_text("ls /dev/nvme0n1; echo LS_DONE=$?",
-                                  r"LS_DONE=\d+", timeout=30)
-    if ls_out is None or not re.search(r"LS_DONE=0", ls_out):
-        pytest.skip(f"nvme0n1 not enumerated; uboot={bmc.get('uboot')} "
-                    f"(PCIe fdt workaround needed)")
+    # Poll for the nvme device: PCIe probe may finish after login on slow
+    # runners (local runs show it present shortly after login).
+    deadline = time.time() + 90
+    present = False
+    while time.time() < deadline:
+        ls_out = console.try_cmd_text("ls /dev/nvme0n1; echo LS_DONE=$?",
+                                      r"LS_DONE=\d+", timeout=15)
+        if ls_out and re.search(r"LS_DONE=0", ls_out):
+            present = True
+            break
+        time.sleep(3)
+    if not present:
+        console.try_cmd("ls /sys/bus/pci/devices/ 2>&1; echo PCI_LS",
+                        r"PCI_LS", timeout=15)
+        pci = console.read().split("PCI_LS")[-1][-400:]
+        pytest.skip(f"nvme0n1 not enumerated (90s poll); "
+                    f"uboot={bmc.get('uboot')}; pci={pci.strip()!r}")
 
     # Re-arm note: blockdev-reopen cannot change inject-error rules, so the
     # launch-time rule must use the event the write path actually emits:
