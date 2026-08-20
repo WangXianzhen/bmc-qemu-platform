@@ -198,19 +198,25 @@ def test_nic_link_down_up(bmc):
 def test_storage_io_error_guest_visible(bmc):
     """blkdebug-injected write error must reach the guest.
 
-    The nvme backend is wrapped in blkdebug (inject write_aio errno=5 once).
-    A raw file backend never errors on truncated-file writes, so this is the
-    deterministic injection path. The guest dd is wrapped in `timeout` so a
-    kernel-side retry loop (observed with nvme+blkdebug) cannot hang CI;
-    it then reports whether the error surfaced, the write timed out, or the
-    injection never fired."""
+    Precise diagnostics: (1) shell-alive probe, (2) fresh-marker ls (the bare
+    'nvme0n1' pattern can match stale boot-log text), (3) timeout-guarded dd,
+    (4) console + nvme-trace deltas captured on hang."""
     qmp, console = bmc["qmp"], bmc["console"]
-    if not console.try_cmd("ls /dev/nvme0n1", r"nvme0n1", timeout=10):
+    if not console.try_cmd("echo SHELL_ALIVE", r"SHELL_ALIVE", timeout=10):
+        pytest.skip("guest shell not responsive before storage test")
+    if not console.try_cmd("ls /dev/nvme0n1; echo LS_DONE=$?",
+                           r"LS_DONE=\d+", timeout=15):
+        pytest.skip("no reply to ls (shell busy)")
+    txt0 = console.read()
+    if "nvme0n1" not in txt0.split("LS_DONE=")[-1]:
         pytest.skip("nvme0n1 not enumerated (PCIe fdt workaround needed)")
+
     off = os.path.getsize(NVME_TRACE) if os.path.exists(NVME_TRACE) else 0
+    cpos = len(console.read())
     txt = console.try_cmd_text("timeout 10 dd if=/dev/zero of=/dev/nvme0n1 "
                                "bs=1M count=4 2>&1; echo RC=$?",
                                r"RC=\d+", timeout=45)
+    console_delta = console.read()[cpos:][-2500:]
     trace_tail = ""
     try:
         with open(NVME_TRACE, errors="replace") as f:
@@ -220,12 +226,14 @@ def test_storage_io_error_guest_visible(bmc):
         pass
     if txt is None:
         pytest.skip(f"console did not return after dd (guest hang); "
-                    f"nvme trace during dd:\n{trace_tail}")
+                    f"console delta:\n{console_delta}\n"
+                    f"nvme trace delta:\n{trace_tail}")
     if "Input/output error" in txt or "I/O error" in txt:
         return                       # PASS: guest observed the injected EIO
     if "RC=124" in txt:
         pytest.skip(f"dd timed out on blkdebug error (nvme retry loop); "
-                    f"nvme trace during dd:\n{trace_tail}")
+                    f"console delta:\n{console_delta}\n"
+                    f"nvme trace delta:\n{trace_tail}")
     pytest.fail(f"storage write did not error as expected; output:\n{txt[-500:]}")
 
 
