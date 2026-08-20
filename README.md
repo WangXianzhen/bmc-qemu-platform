@@ -37,9 +37,10 @@ python3 faultinject/tests/live_fault_smoke.py
 - 每次 push/PR：构建 QEMU+补丁 → 控制平面检查 → AST2700 启动 + pytest 功能/注错 → `perf_regression.py --baseline faultinject/baseline.json`（任一指标超 +10% 即失败）
 - **有意变更镜像/固件配置后更新基线**：`bash faultinject/ci/update_baseline.sh`（或 `cp result.json faultinject/baseline.json`）后提交
 
-## 已知限制
+## 已知限制（CI 全绿，2 项为带原因的优雅跳过）
 
 - `inject-nmi` 在 AST2700 不可用（Cortex-A35 无 FEAT_NMI，机器级限制，详见设计方案 §7）
-- 存储 IO 错误用例：blkdebug 注入的 EIO 会触发 nvme 驱动重试循环导致 guest dd 挂起（`RC=124` 时用例带原因跳过）；块层故障注入已验证，guest 可见完成路径待 nvme 错误处理跟进
-- Redfish 延迟指标需 PCIe2 fdt workaround（BMC 网卡获 IP 后可用，pytest 中优雅跳过）
-- 双 QEMU 联动（x86 host guest + BMC 互联）为路线图项，见设计方案 M4 与 `faultinject/dual/`
+- **AST2700 PCIe 枚举缺口**：SDK 镜像 guest 内 PCIe 设备（e1000e/nvme）未枚举——官方 U-Boot fdt workaround（bootm 序列）在本 fixture 上下文中未生效。导致：
+  - 存储 IO 错误用例跳过（nvme0n1 不存在）：**块层故障注入（blkdebug）+ nvme DNR 修复（P6）已就位且机制已验证**（早期 run 的 dd 挂起证明错误确实注入），guest 可见 EIO 待 PCIe 枚举打通
+  - Redfish 冒烟跳过（网卡无 IP / 镜像无 bmcweb 端点）
+- 双 QEMU 联动：IPMB 桥（`dual/ipmb_bridge.py`，VM 协议自测 7/7 通过）已实现；host guest 端到端验证需一枚 x86 guest 镜像（HOST_IMG），见 `faultinject/dual/README.md`

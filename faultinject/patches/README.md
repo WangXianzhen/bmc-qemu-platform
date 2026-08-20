@@ -70,7 +70,7 @@
 | 文件 | `hw/nvme/ctrl.c`（`nvme_rw_complete_cb`） |
 | 问题 | 后端 IO 错误（如 blkdebug 注入）完成命令时状态 `NVME_WRITE_FAULT`/`NVME_UNRECOVERED_READ`/`NVME_INTERNAL_DEV_ERROR` **未置 DNR** → Linux nvme 驱动视为可重试 → 无限重试，guest dd 挂起（RC=124） |
 | 修复 | 三处状态均 `| NVME_DNR`（与 nvme 其他错误路径一致），驱动立即以 EIO 失败命令 |
-| 验证 | 本地 `verify_storage_eio.py`（blkdebug 注入 EIO，guest dd 应看到 Input/output error）；CI pytest `test_storage_io_error_guest_visible` 由 skip 转 pass |
+| 验证 | 块层注入已验证（早期 run 的 dd 挂起证明 blkdebug 错误送达）；guest 可见 EIO 的端到端验证被 **AST2700 PCIe 枚举缺口**阻塞（guest 内 nvme0n1 未枚举，SDK 镜像需官方 fdt workaround 且本 fixture 上下文中未生效）——CI 用例 `test_storage_io_error_guest_visible` 以精确原因跳过 |
 
 ## 待办（后续轮次）
 
