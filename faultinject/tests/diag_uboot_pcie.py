@@ -96,24 +96,34 @@ class Console:
 
 
 def main():
-    proc = subprocess.Popen(
-        [QEMU, "-machine", "ast2700-evb", "-smp", "4", "-m", "2G",
-         "-drive", f"file={IMG},format=raw,if=mtd",
-         "-blockdev", f"driver=file,node-name=nvme-file,filename={NVME_IMG}",
-         "-blockdev", "driver=blkdebug,node-name=nvme-bd,image=nvme-file,"
-                      "inject-error.0.event=pwritev,"
-                      "inject-error.0.errno=5,"
-                      "inject-error.0.once=on",
-         "-device", "nvme,serial=SN0001,drive=nvme-bd,bus=pcie.2,id=nvme0",
-         "-device", "e1000e,netdev=net0,bus=pcie.2,id=nic0",
-         "-netdev", "user,id=net0,hostfwd=tcp::2443-:443",
-         "-qmp", QMP + ",server=on,wait=off",
-         "-L", PC_BIOS,
-         "-chardev", f"socket,id=console0,host=127.0.0.1,port={CPORT},"
-                     "server=on,wait=off",
-         "-serial", "chardev:console0",
-         "-display", "none", "-monitor", "none"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # ensure the nvme backing file exists (QEMU raw driver creates it, but
+    # be explicit; a missing parent dir would fail the launch)
+    os.makedirs(os.path.dirname(NVME_IMG), exist_ok=True)
+    if not os.path.exists(NVME_IMG):
+        with open(NVME_IMG, "wb") as f:
+            f.truncate(4 * 1024 * 1024 * 1024)
+
+    args = [
+        QEMU, "-machine", "ast2700-evb", "-smp", "4", "-m", "2G",
+        "-drive", f"file={IMG},format=raw,if=mtd",
+        "-blockdev", f"driver=file,node-name=nvme-file,filename={NVME_IMG}",
+        "-blockdev", "driver=blkdebug,node-name=nvme-bd,image=nvme-file,"
+                     "inject-error.0.event=pwritev,"
+                     "inject-error.0.errno=5,"
+                     "inject-error.0.once=on",
+        "-device", "nvme,serial=SN0001,drive=nvme-bd,bus=pcie.2,id=nvme0",
+        "-device", "e1000e,netdev=net0,bus=pcie.2,id=nic0",
+        "-netdev", "user,id=net0,hostfwd=tcp::2443-:443",
+        "-qmp", QMP + ",server=on,wait=off",
+        "-L", PC_BIOS,
+        "-chardev", f"socket,id=console0,host=127.0.0.1,port={CPORT},"
+                    "server=on,wait=off",
+        "-serial", "chardev:console0",
+        "-display", "none", "-monitor", "none",
+    ]
+    log(f"launching QEMU: {' '.join(args)}")
+    errlog = open(LOG + ".qemu-stderr", "w")
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=errlog)
     try:
         con = Console(CPORT)
 
@@ -192,6 +202,7 @@ def main():
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
+        errlog.close()
         logf.close()
 
 
