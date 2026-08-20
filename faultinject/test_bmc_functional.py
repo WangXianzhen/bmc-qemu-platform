@@ -160,8 +160,14 @@ def bmc():
                       "inject-error.0.errno=5,"
                       "inject-error.0.once=on",
          "-device", "nvme,serial=SN0001,drive=nvme-bd,bus=pcie.2,id=nvme0",
-         "-device", "e1000e,netdev=net0,bus=pcie.2,id=nic0",
-         "-netdev", f"user,id=net0,hostfwd=tcp::{2443}-:443",
+         # Management NIC: connect the SoC's own ftgmac100[0] (guest eth0)
+         # via -nic. Do NOT add e1000e on pcie.2: the AST2700 PCIe2 root
+         # port only allows slot 0 (QEMU: "slot 1 is not valid for e1000e,
+         # parent device only allows plugging into slot 0"), so a second
+         # pcie.2 device is silently not plugged and never shows up in the
+         # guest - which is exactly why /dev/eth2 never existed and Redfish
+         # was unreachable. nvme owns pcie.2 slot 0; the MAC is on the SoC.
+         "-nic", f"user,id=net0,hostfwd=tcp::{2443}-:443",
          "-watchdog-action", "pause",
          "-qmp", QMP_ADDR + ",server=on,wait=off",
          "-L", PC_BIOS,
@@ -383,14 +389,17 @@ def test_psu_fault_injection(bmc):
 
 
 def test_nic_link_down_up(bmc):
-    """set_link fault: link lost, then restored (guest-visible carrier)."""
+    """set_link fault: link lost, then restored (guest-visible carrier).
+
+    The management NIC is the SoC ftgmac100[0] (guest eth0), connected via
+    -nic user (see fixture)."""
     qmp, console = bmc["qmp"], bmc["console"]
     qmp.set_link("net0", False)
-    out = console.exec_cmd("cat /sys/class/net/eth2/carrier", r"[01]",
+    out = console.exec_cmd("cat /sys/class/net/eth0/carrier", r"[01]",
                            timeout=30)
     assert "0" in out
     qmp.set_link("net0", True)
-    out = console.exec_cmd("cat /sys/class/net/eth2/carrier", r"[01]",
+    out = console.exec_cmd("cat /sys/class/net/eth0/carrier", r"[01]",
                            timeout=30)
     assert "1" in out
 
@@ -399,19 +408,26 @@ def test_redfish_smoke(bmc):
     """Bring up the management NIC (static IP on the user-net subnet) and
     probe Redfish via hostfwd.
 
-    eth2 is present in the guest (verified by test_nic_link_down_up); DHCP
-    via udhcpc is not reliable on this image, so we assign the user-net
-    address statically. Skips when Redfish is not served by the image."""
+    eth0 is the SoC ftgmac100[0] (see fixture); DHCP via udhcpc is not
+    reliable on this image, so we assign the user-net address statically.
+    bmcweb in this SDK is HTTPS-only, so probe https with certificate
+    verification disabled (self-signed BMC cert). Skips when Redfish is
+    not served by the image."""
+    import ssl
     console = bmc["console"]
-    if not console.try_cmd("ip link set eth2 up", r"#"):
-        pytest.skip("eth2 not present (PCIe2 fdt workaround needed)")
-    console.try_cmd("ip addr flush dev eth2", r"#")
-    if not console.try_cmd("ip addr add 10.0.2.15/24 dev eth2", r"#"):
-        pytest.skip("could not assign IP to eth2")
+    if not console.try_cmd("ip link set eth0 up", r"#"):
+        pytest.skip("eth0 not present (ftgmac NIC not connected)")
+    console.try_cmd("ip addr flush dev eth0", r"#")
+    if not console.try_cmd("ip addr add 10.0.2.15/24 dev eth0", r"#"):
+        pytest.skip("could not assign IP to eth0")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
     deadline = time.time() + 25
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(REDFISH_URL, timeout=5) as r:
+            with urllib.request.urlopen(REDFISH_URL.replace(
+                    "http://", "https://"), timeout=5, context=ctx) as r:
                 assert r.status == 200
             return
         except Exception:
