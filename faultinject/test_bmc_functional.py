@@ -33,6 +33,8 @@ QMP_ADDR = os.environ.get(
 NVME_IMG = os.environ.get("NVME_IMG", "/tmp/ast2700-nvme-test.img")
 REDFISH_URL = "http://127.0.0.1:2443/redfish/v1"   # hostfwd from fixture
 NVME_TRACE = "/tmp/ast2700-nvme-trace.log"          # -D trace file
+QEMU_STDERR = os.environ.get("QEMU_STDERR",
+                             "/tmp/ast2700-qemu-stderr.log")
 CONSOLE_PORT = 4567                                  # socket chardev console
 
 
@@ -132,10 +134,13 @@ def bmc():
         os.unlink(QMP_SOCK)
     if os.path.exists(NVME_TRACE):
         os.unlink(NVME_TRACE)
+    if os.path.exists(QEMU_STDERR):
+        os.unlink(QEMU_STDERR)
     # nvme backing file (sparse)
     with open(NVME_IMG, "wb") as f:
         f.truncate(4 * 1024 * 1024 * 1024)
 
+    errlog = open(QEMU_STDERR, "w")   # keep QEMU stderr for diagnostics
     proc = subprocess.Popen(
         [QEMU, "-machine", "ast2700-evb", "-smp", "4", "-m", "2G",
          "-drive", f"file={IMG},format=raw,if=mtd",
@@ -158,7 +163,7 @@ def bmc():
          "-serial", "chardev:console0",
          "-display", "none", "-monitor", "none"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL)
+        stderr=errlog)
     try:
         qmp = QMPClient(QMP_ADDR)
         qmp.connect()
@@ -215,7 +220,19 @@ def bmc():
             stop_spam.set()
             uboot["fallback"] = True
             console.try_cmd("boot", r"Starting kernel|login:", timeout=600)
-        console.wait_for(r"login:", timeout=600)   # SDK v11.03 boots to login
+        try:
+            console.wait_for(r"login:", timeout=600)  # SDK v11.03 boots to login
+        except BaseException:
+            # attach QEMU stderr evidence so a hang here is diagnosable
+            tail = ""
+            try:
+                with open(QEMU_STDERR, "r", errors="replace") as f:
+                    tail = f.read()[-1500:]
+            except OSError:
+                pass
+            pytest.fail(f"no login: after U-Boot sequence; uboot={uboot}; "
+                        f"console tail:\n{console.read()[-1500:]}\n"
+                        f"QEMU stderr tail:\n{tail}")
 
         # Log in so the tests get a real shell (without login, every
         # console command just hits the login prompt -> 'Login incorrect').
@@ -229,6 +246,7 @@ def bmc():
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        errlog.close()
 
 
 def test_boot_to_login(bmc):

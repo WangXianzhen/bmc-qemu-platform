@@ -93,10 +93,16 @@ log "IPMB bridge codec self-test (VM protocol vectors)"
 $PY "$WORKSPACE/faultinject/dual/ipmb_bridge.py" --self-test
 
 # 6) functional + fault-injection suite -------------------------------------
+# Note: pytest failures must NOT abort the run here: the U-Boot/PCIe diag
+# step below is the independent evidence source for the CI PCIe-enumeration
+# question, and a flaky fixture boot (login timeout) must not hide it. We
+# record the pytest exit code and combine it with diag at the end.
 log "functional/fault-injection pytest suite (boots AST2700 A2)"
 export QEMU="$BUILD_DIR/qemu-system-aarch64"
 export IMG="$IMG_DIR/image-bmc"
-$PY -m pytest -rs "$WORKSPACE/faultinject/test_bmc_functional.py" -v
+PYTEST_RC=0
+$PY -m pytest -rs "$WORKSPACE/faultinject/test_bmc_functional.py" -v \
+    || PYTEST_RC=$?
 
 # 6b) U-Boot/PCIe diagnostic (opt-in; RUN_DIAG=1) ----------------------------
 # Reproduces the PCIe2 fdt workaround step-by-step and reports the guest's
@@ -107,8 +113,9 @@ if [ "${RUN_DIAG:-0}" = "1" ]; then
   export IMG_DIAG="$IMG_DIR/image-bmc"
   export DIAG_LOG="$DIAG_LOG"
   $PY "$WORKSPACE/faultinject/tests/diag_uboot_pcie.py" \
-      || { echo "DIAG FAILED (see $DIAG_LOG)"; exit 1; }
+      || { echo "DIAG FAILED (see $DIAG_LOG)"; DIAG_RC=1; }
 fi
+DIAG_RC="${DIAG_RC:-0}"
 
 # 7) performance regression gate --------------------------------------------
 if [ "${SKIP_PERF:-0}" != "1" ]; then
@@ -116,8 +123,21 @@ if [ "${SKIP_PERF:-0}" != "1" ]; then
   cd "$WORKSPACE"
   $PY faultinject/perf_regression.py \
       --baseline "$BASELINE" --out result.json \
-      || { echo "PERF REGRESSION GATE FAILED (see result.json)"; exit 1; }
-  echo "PERF GATE PASSED"
+      || { echo "PERF REGRESSION GATE FAILED (see result.json)"; PERF_RC=1; }
+  if [ "${PERF_RC:-0}" = "0" ]; then
+    echo "PERF GATE PASSED"
+  fi
 fi
+PERF_RC="${PERF_RC:-0}"
 
+# 8) combined result ---------------------------------------------------------
+# Any of pytest / diag / perf failing fails the job; the summary makes it
+# explicit which stage(s) failed so a flaky fixture boot never hides the
+# diag evidence (and vice versa).
+log "BMC platform CI: combined result"
+echo "pytest rc=$PYTEST_RC  diag rc=$DIAG_RC  perf rc=$PERF_RC"
+if [ "$PYTEST_RC" != "0" ] || [ "$DIAG_RC" != "0" ] || [ "$PERF_RC" != "0" ]; then
+  echo "BMC platform CI: FAILED (pytest=$PYTEST_RC diag=$DIAG_RC perf=$PERF_RC)"
+  exit 1
+fi
 log "BMC platform CI: ALL STAGES PASSED"
