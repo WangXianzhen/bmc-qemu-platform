@@ -149,15 +149,19 @@ def bmc():
          # emulated managed-platform components (see launch_ast2700.sh)
          "-device", "tmp105,bus=aspeed.i2c.bus.1,address=0x4d,id=temp-mb",
          "-device", "adm1272,bus=aspeed.i2c.bus.1,address=0x10,id=psu0",
-         "-device", "e1000e,netdev=net0,bus=pcie.2,id=nic0",
-         "-netdev", f"user,id=net0,hostfwd=tcp::{2443}-:443",
          # storage: file backend + blkdebug error injection (write_aio, once)
+         # NOTE: nvme must be registered BEFORE e1000e on pcie.2 - QEMU
+         # assigns slots in registration order and the guest nvme driver
+         # only probes the device in the first slot (verified locally: with
+         # e1000e first, /dev/nvme0n1 never appears; diag uses this order).
          "-blockdev", f"driver=file,node-name=nvme-file,filename={NVME_IMG}",
          "-blockdev", "driver=blkdebug,node-name=nvme-bd,image=nvme-file,"
                       "inject-error.0.event=pwritev,"
                       "inject-error.0.errno=5,"
                       "inject-error.0.once=on",
          "-device", "nvme,serial=SN0001,drive=nvme-bd,bus=pcie.2,id=nvme0",
+         "-device", "e1000e,netdev=net0,bus=pcie.2,id=nic0",
+         "-netdev", f"user,id=net0,hostfwd=tcp::{2443}-:443",
          "-watchdog-action", "pause",
          "-qmp", QMP_ADDR + ",server=on,wait=off",
          "-L", PC_BIOS,
