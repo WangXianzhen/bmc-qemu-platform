@@ -248,15 +248,21 @@ def test_storage_io_error_guest_visible(bmc):
                     f"{console.read()[len(c0):][-800:]!r}")
     c1 = console.read()
     # Poll for the nvme device: PCIe probe may finish after login on slow
-    # runners (local runs show it present shortly after login).
+    # runners, or miss the link entirely (guest-side rescan re-probes).
     deadline = time.time() + 90
     present = False
+    tries = 0
     while time.time() < deadline:
         ls_out = console.try_cmd_text("ls /dev/nvme0n1; echo LS_DONE=$?",
                                       r"LS_DONE=\d+", timeout=15)
         if ls_out and re.search(r"LS_DONE=0", ls_out):
             present = True
             break
+        tries += 1
+        if tries == 2:
+            # Force a guest-side PCI rescan to recover a missed probe race
+            console.try_cmd("echo 1 > /sys/bus/pci/rescan 2>/dev/null",
+                            r"#", timeout=15)
         time.sleep(3)
     if not present:
         console.try_cmd("ls /sys/bus/pci/devices/ 2>&1; echo PCI_LS",
