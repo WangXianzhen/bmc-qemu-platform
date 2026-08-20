@@ -194,6 +194,49 @@ def test_boot_to_login(bmc):
     assert "login:" in bmc["console"].read()
 
 
+def test_storage_io_error_guest_visible(bmc):
+    """blkdebug-injected write error must reach the guest (run FIRST after
+    boot to avoid interference from later console-interactive tests)."""
+    qmp, console = bmc["qmp"], bmc["console"]
+    c0 = console.read()
+    if not console.try_cmd("echo SHELL_ALIVE_9X", r"SHELL_ALIVE_9X",
+                           timeout=10):
+        pytest.skip(f"guest shell not responsive; console delta: "
+                    f"{console.read()[len(c0):][-800:]!r}")
+    c1 = console.read()
+    if not console.try_cmd("ls /dev/nvme0n1; echo LS_DONE=$?",
+                           r"LS_DONE=\d+", timeout=30):
+        pytest.skip(f"no reply to ls; console delta: "
+                    f"{console.read()[len(c1):][-1200:]!r}")
+    if "nvme0n1" not in console.read().split("LS_DONE=")[-1]:
+        pytest.skip("nvme0n1 not enumerated (PCIe fdt workaround needed)")
+
+    off = os.path.getsize(NVME_TRACE) if os.path.exists(NVME_TRACE) else 0
+    cpos = len(console.read())
+    txt = console.try_cmd_text("timeout 10 dd if=/dev/zero of=/dev/nvme0n1 "
+                               "bs=1M count=4 2>&1; echo RC=$?",
+                               r"RC=\d+", timeout=45)
+    console_delta = console.read()[cpos:][-2500:]
+    trace_tail = ""
+    try:
+        with open(NVME_TRACE, errors="replace") as f:
+            f.seek(off)
+            trace_tail = f.read()[-3000:]
+    except Exception:
+        pass
+    if txt is None:
+        pytest.skip(f"console did not return after dd (guest hang); "
+                    f"console delta:\n{console_delta}\n"
+                    f"nvme trace delta:\n{trace_tail}")
+    if "Input/output error" in txt or "I/O error" in txt:
+        return                       # PASS: guest observed the injected EIO
+    if "RC=124" in txt:
+        pytest.skip(f"dd timed out on blkdebug error (nvme retry loop); "
+                    f"console delta:\n{console_delta}\n"
+                    f"nvme trace delta:\n{trace_tail}")
+    pytest.fail(f"storage write did not error as expected; output:\n{txt[-500:]}")
+
+
 def test_sensor_fault_injection(bmc):
     """temp-mb: qom-set temperature fault; guest hwmon readback best-effort.
 
@@ -247,48 +290,6 @@ def test_nic_link_down_up(bmc):
     out = console.exec_cmd("cat /sys/class/net/eth2/carrier", r"[01]",
                            timeout=30)
     assert "1" in out
-
-
-def test_storage_io_error_guest_visible(bmc):
-    """blkdebug-injected write error must reach the guest.
-
-    Precise diagnostics: (1) shell-alive probe, (2) fresh-marker ls (the bare
-    'nvme0n1' pattern can match stale boot-log text), (3) timeout-guarded dd,
-    (4) console + nvme-trace deltas captured on hang."""
-    qmp, console = bmc["qmp"], bmc["console"]
-    if not console.try_cmd("echo SHELL_ALIVE", r"SHELL_ALIVE", timeout=10):
-        pytest.skip("guest shell not responsive before storage test")
-    if not console.try_cmd("ls /dev/nvme0n1; echo LS_DONE=$?",
-                           r"LS_DONE=\d+", timeout=15):
-        pytest.skip("no reply to ls (shell busy)")
-    txt0 = console.read()
-    if "nvme0n1" not in txt0.split("LS_DONE=")[-1]:
-        pytest.skip("nvme0n1 not enumerated (PCIe fdt workaround needed)")
-
-    off = os.path.getsize(NVME_TRACE) if os.path.exists(NVME_TRACE) else 0
-    cpos = len(console.read())
-    txt = console.try_cmd_text("timeout 10 dd if=/dev/zero of=/dev/nvme0n1 "
-                               "bs=1M count=4 2>&1; echo RC=$?",
-                               r"RC=\d+", timeout=45)
-    console_delta = console.read()[cpos:][-2500:]
-    trace_tail = ""
-    try:
-        with open(NVME_TRACE, errors="replace") as f:
-            f.seek(off)
-            trace_tail = f.read()[-3000:]
-    except Exception:
-        pass
-    if txt is None:
-        pytest.skip(f"console did not return after dd (guest hang); "
-                    f"console delta:\n{console_delta}\n"
-                    f"nvme trace delta:\n{trace_tail}")
-    if "Input/output error" in txt or "I/O error" in txt:
-        return                       # PASS: guest observed the injected EIO
-    if "RC=124" in txt:
-        pytest.skip(f"dd timed out on blkdebug error (nvme retry loop); "
-                    f"console delta:\n{console_delta}\n"
-                    f"nvme trace delta:\n{trace_tail}")
-    pytest.fail(f"storage write did not error as expected; output:\n{txt[-500:]}")
 
 
 def test_redfish_smoke(bmc):
