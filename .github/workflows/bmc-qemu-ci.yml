@@ -31,3 +31,7 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
           # baseline lives in the repo so regressions gate on commit diffs
           BASELINE: ${{ github.workspace }}/faultinject/baseline.json
+          # QEMU pinned to the locally-verified revision (daily master drift
+          # changes TCG/PCIe behavior); RUN_DIAG compares Linux PCIe enum.
+          QEMU_REV: fa19879df1658f96ac07365fca8835b7decd6995
+          RUN_DIAG: "1"
