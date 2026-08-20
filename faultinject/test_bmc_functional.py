@@ -31,6 +31,7 @@ QMP_ADDR = os.environ.get(
     "tcp:127.0.0.1:4450" if os.name == "nt" else f"unix:{QMP_SOCK}")
 NVME_IMG = os.environ.get("NVME_IMG", "/tmp/ast2700-nvme-test.img")
 REDFISH_URL = "http://127.0.0.1:2443/redfish/v1"   # hostfwd from fixture
+NVME_TRACE = "/tmp/ast2700-nvme-trace.log"          # -D trace file
 
 
 class Console:
@@ -92,6 +93,8 @@ def bmc():
     """Launch the DUT once per module; teardown via QMP quit + kill."""
     if os.path.exists(QMP_SOCK):
         os.unlink(QMP_SOCK)
+    if os.path.exists(NVME_TRACE):
+        os.unlink(NVME_TRACE)
     # nvme backing file (sparse)
     with open(NVME_IMG, "wb") as f:
         f.truncate(4 * 1024 * 1024 * 1024)
@@ -99,6 +102,7 @@ def bmc():
     proc = subprocess.Popen(
         [QEMU, "-machine", "ast2700-evb", "-smp", "4", "-m", "2G",
          "-drive", f"file={IMG},format=raw,if=mtd",
+         "-trace", "enable=pci_nvme_*", "-D", NVME_TRACE,
          # emulated managed-platform components (see launch_ast2700.sh)
          "-device", "tmp105,bus=aspeed.i2c.bus.1,address=0x4d,id=temp-mb",
          "-device", "adm1272,bus=aspeed.i2c.bus.1,address=0x10,id=psu0",
@@ -207,14 +211,20 @@ def test_storage_io_error_guest_visible(bmc):
                                "bs=1M count=4 2>&1; echo RC=$?",
                                r"RC=\d+", timeout=45)
     tail = console.read()[-1500:]
+    trace_tail = ""
+    try:
+        with open(NVME_TRACE, errors="replace") as f:
+            trace_tail = "".join(f.readlines()[-25:])
+    except FileNotFoundError:
+        pass
     if txt is None:
         pytest.skip(f"console did not return after dd (guest hang); "
-                    f"console tail: {tail[-900:]!r}")
+                    f"nvme trace tail:\n{trace_tail}")
     if "Input/output error" in txt or "I/O error" in txt:
         return                       # PASS: guest observed the injected EIO
     if "RC=124" in txt:
-        pytest.skip("dd timed out on blkdebug error (nvme retry loop); "
-                    f"console tail: {tail[-900:]!r}")
+        pytest.skip(f"dd timed out on blkdebug error (nvme retry loop); "
+                    f"nvme trace tail:\n{trace_tail}")
     pytest.fail(f"storage write did not error as expected; output:\n{txt[-500:]}")
 
 
