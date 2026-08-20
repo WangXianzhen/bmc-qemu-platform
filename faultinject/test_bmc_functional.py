@@ -258,7 +258,10 @@ def test_storage_io_error_guest_visible(bmc):
 
     off = os.path.getsize(NVME_TRACE) if os.path.exists(NVME_TRACE) else 0
     cpos = len(console.read())
-    txt = console.try_cmd_text("timeout 10 dd if=/dev/zero of=/dev/nvme0n1 "
+    # NB: this image's busybox has no `timeout` command, so run dd directly;
+    # with the nvme DNR fix (P6) the blkdebug-injected EIO completes the
+    # command immediately instead of retrying forever.
+    txt = console.try_cmd_text("dd if=/dev/zero of=/dev/nvme0n1 "
                                "bs=1M count=4 2>&1; echo RC=$?",
                                r"RC=\d+", timeout=45)
     console_delta = console.read()[cpos:][-2500:]

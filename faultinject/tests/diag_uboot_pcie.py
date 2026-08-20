@@ -142,37 +142,37 @@ def main():
             return 1
         log("logged in")
 
-        log("== guest state ==")
-        base = len(con.read())
-        con.sock.sendall(b"cat /proc/cmdline; echo CMD_DONE\n")
-        con.wait_for(r"CMD_DONE", timeout=20)
-        seg = con.read()[base:].split("CMD_DONE")[0]
-        m = re.search(r"(?:Kernel )?command line: ([^\r\n]+)", seg)
+        log("== guest state (whole-console checks) ==")
+        full = lambda: con.read()
+
+        con.sock.sendall(b"cat /proc/cmdline\n")
+        con.wait_for(r"root@", timeout=20)
+        m = re.search(r"(?:Kernel )?command line: ([^\r\n]+)", full())
         log(f"  cmdline: {m.group(1) if m else '(not captured)'}")
-        log(f"  cryptomgr.notests=1: {'cryptomgr.notests=1' in seg}")
+        log(f"  cryptomgr.notests=1: {'cryptomgr.notests=1' in full()}")
 
-        base = len(con.read())
-        con.sock.sendall(b"ls /sys/bus/pci/devices/ 2>&1; echo PCI_END\n")
-        con.wait_for(r"PCI_END", timeout=20)
-        log(f"  pci: {con.read()[base:].split('PCI_END')[0].strip()!r}")
+        con.sock.sendall(b"ls /sys/bus/pci/devices/\n")
+        con.wait_for(r"root@", timeout=20)
+        log(f"  pci 0002:xx: {bool(re.search(r'0002:[0-9a-f:]+', full()))}")
+        log(f"  pci tail: {full()[-400:]!r}")
 
-        base = len(con.read())
-        con.sock.sendall(b"ls /dev/nvme0n1 2>&1; echo NVME_END\n")
-        con.wait_for(r"NVME_END", timeout=20)
-        log(f"  nvme0n1: {con.read()[base:].split('NVME_END')[0].strip()!r}")
+        con.sock.sendall(b"ls /dev/nvme0n1\n")
+        con.wait_for(r"root@", timeout=20)
+        log(f"  nvme0n1 present: {'nvme0n1' in full().split('ls /dev/nvme0n1')[-1]}")
 
-        base = len(con.read())
-        con.sock.sendall(b"ls /sys/class/net/ 2>&1; echo NET_END\n")
-        con.wait_for(r"NET_END", timeout=20)
-        log(f"  net: {con.read()[base:].split('NET_END')[0].strip()!r}")
+        con.sock.sendall(b"ls /sys/class/net/\n")
+        con.wait_for(r"root@", timeout=20)
+        seg = full().split("ls /sys/class/net/")[-1][:200]
+        log(f"  net: {seg.strip()!r}")
 
         log("== storage EIO scenario (blkdebug + nvme DNR fix) ==")
-        base = len(con.read())
-        con.sock.sendall(b"timeout 10 dd if=/dev/zero of=/dev/nvme0n1 "
-                         b"bs=1M count=4 2>&1; echo RC=$?\n")
+        base = len(full())
+        con.sock.sendall(b"dd if=/dev/zero of=/dev/nvme0n1 bs=1M count=4 "
+                         b"2>&1; echo RC=$?\n")
         con.wait_for(r"RC=\d+", timeout=45)
-        seg = con.read()[base:].split("RC=")[0]
-        log(f"  dd output: {seg.strip()[-600:]!r}")
+        seg = full()[base:]
+        log(f"  EIO seen: {'Input/output error' in seg or 'I/O error' in seg}")
+        log(f"  dd seg: {seg[-700:]!r}")
         log("== DIAG DONE ==")
         return 0
     finally:
