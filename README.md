@@ -40,7 +40,8 @@ python3 faultinject/tests/live_fault_smoke.py
 ## 已知限制（CI 全绿，2 项为带原因的优雅跳过）
 
 - `inject-nmi` 在 AST2700 不可用（Cortex-A35 无 FEAT_NMI，机器级限制，详见设计方案 §7）
-- **AST2700 PCIe 枚举缺口**：SDK 镜像 guest 内 PCIe 设备（e1000e/nvme）未枚举——官方 U-Boot fdt workaround（bootm 序列）在本 fixture 上下文中未生效。导致：
-  - 存储 IO 错误用例跳过（nvme0n1 不存在）：**块层故障注入（blkdebug）+ nvme DNR 修复（P6）已就位且机制已验证**（早期 run 的 dd 挂起证明错误确实注入），guest 可见 EIO 待 PCIe 枚举打通
+- **AST2700 PCIe 枚举（CI 环境）**：U-Boot fdt workaround 序列在 CI 上成功执行（`uboot.pcie_ok=True`）但 guest 内 PCI 总线偶发为空（本地 Windows 构建同一序列稳定枚举 `0002:00:00.0/0002:01:00.0` 且 `/dev/nvme0n1` 存在）——疑似上游 master 每日漂移/TCG 时序的集成差异。影响：
+  - 存储 IO 错误用例在 CI 上带诊断跳过，但**本地方向已验证端到端**：PCIe 枚举 → nvme 出现 → blkdebug `pwritev` 注入 EIO → 内核日志 `Buffer I/O error on dev nvme0n1`（nvme DNR 修复 P6 保证不重试挂起）
   - Redfish 冒烟跳过（网卡无 IP / 镜像无 bmcweb 端点）
 - 双 QEMU 联动：IPMB 桥（`dual/ipmb_bridge.py`，VM 协议自测 7/7 通过）已实现；host guest 端到端验证需一枚 x86 guest 镜像（HOST_IMG），见 `faultinject/dual/README.md`
+- 排障工具：`faultinject/tests/diag_uboot_pcie.py`（逐步抓取 U-Boot 序列响应 + guest PCIe/nvme/cmdline 状态）
