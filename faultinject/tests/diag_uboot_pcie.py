@@ -16,13 +16,24 @@ import sys
 import threading
 import time
 
-QEMU = r"D:/dsh-qemu/qemu-master/build-mingw/qemu-system-aarch64.exe"
-IMG = r"D:/dsh-qemu/images/ast2700-default-image/image-bmc"
-PC_BIOS = r"D:/dsh-qemu/qemu-master/pc-bios"
-NVME_IMG = r"D:/dsh-qemu/nvme.img"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+IS_WIN = os.name == "nt"
+QEMU = os.environ.get(
+    "QEMU_DIAG",
+    os.path.join(REPO, "qemu-master",
+                 "build-mingw/qemu-system-aarch64.exe" if IS_WIN
+                 else "build-ci/qemu-system-aarch64"))
+IMG = os.environ.get(
+    "IMG_DIAG",
+    os.path.join(REPO, "images", "ast2700-default-image", "image-bmc"))
+PC_BIOS = os.environ.get(
+    "PC_BIOS", os.path.join(REPO, "qemu-master", "pc-bios"))
+NVME_IMG = os.environ.get(
+    "NVME_IMG",
+    os.path.join(REPO, "nvme.img" if IS_WIN else "/tmp/ast2700-nvme-diag.img"))
 QMP = "tcp:127.0.0.1:4455"
 CPORT = 4568
-LOG = r"D:\dsh-qemu\diag-uboot.log"
+LOG = os.environ.get("DIAG_LOG", os.path.join(REPO, "diag-uboot.log"))
 
 logf = open(LOG, "w", encoding="utf-8")
 

@@ -21,11 +21,17 @@ QEMU_SRC="$WORKSPACE/qemu-master"
 BUILD_DIR="$QEMU_SRC/build-ci"
 QEMU_REPO="${QEMU_REPO:-https://gitlab.com/qemu-project/qemu.git}"
 QEMU_BRANCH="${QEMU_BRANCH:-master}"
+# Pin the exact QEMU revision the platform was verified against (local build
+# = fa19879d). Daily master drift changes TCG/PCIe behavior; override with
+# QEMU_REV=<sha> to test a different commit (or unset to follow master).
+QEMU_REV="${QEMU_REV:-fa19879df1658f96ac07365fca8835b7decd6995}"
 PATCH="$WORKSPACE/faultinject/patches/qemu-master-local.patch"
 IMG_URL="${IMG_URL:-https://github.com/AspeedTech-BMC/openbmc/releases/download/v11.03/ast2700-default-image.tar.gz}"
 IMG_DIR="$WORKSPACE/images/ast2700-default-image"
 BASELINE="${BASELINE:-$WORKSPACE/faultinject/baseline.json}"
 PY="python3"
+RUN_DIAG="${RUN_DIAG:-0}"     # run the U-Boot/PCIe diagnostic step
+DIAG_LOG="${DIAG_LOG:-$WORKSPACE/diag-uboot.log}"
 
 log() { echo -e "\n=== $* ==="; }
 
@@ -41,14 +47,18 @@ if [ "${SKIP_DEPS:-0}" != "1" ]; then
   $PY -m pip install -q --break-system-packages meson
 fi
 
-# 2) QEMU source + local patches --------------------------------------------
-log "fetching QEMU $QEMU_BRANCH"
+# 2) QEMU source (pinned revision) + local patches ---------------------------
+log "fetching QEMU $QEMU_REV (branch $QEMU_BRANCH)"
 if [ ! -d "$QEMU_SRC/.git" ]; then
-  git clone --depth 1 --branch "$QEMU_BRANCH" "$QEMU_REPO" "$QEMU_SRC"
-else
-  git -C "$QEMU_SRC" fetch --depth 1 origin "$QEMU_BRANCH"
-  git -C "$QEMU_SRC" checkout -f FETCH_HEAD
+  git init -q "$QEMU_SRC"
+  git -C "$QEMU_SRC" remote add origin "$QEMU_REPO"
 fi
+if ! git -C "$QEMU_SRC" fetch -q --depth 1 origin "$QEMU_REV" 2>/dev/null; then
+  echo "note: could not fetch exact revision, falling back to $QEMU_BRANCH"
+  git -C "$QEMU_SRC" fetch -q --depth 1 origin "$QEMU_BRANCH"
+fi
+git -C "$QEMU_SRC" checkout -q -f FETCH_HEAD
+git -C "$QEMU_SRC" log -1 --format="pinned QEMU: %h %ci %s"
 
 log "applying local fault-injection patches"
 if git -C "$QEMU_SRC" apply --check "$PATCH" 2>/dev/null; then
@@ -87,6 +97,18 @@ log "functional/fault-injection pytest suite (boots AST2700 A2)"
 export QEMU="$BUILD_DIR/qemu-system-aarch64"
 export IMG="$IMG_DIR/image-bmc"
 $PY -m pytest -rs "$WORKSPACE/faultinject/test_bmc_functional.py" -v
+
+# 6b) U-Boot/PCIe diagnostic (opt-in; RUN_DIAG=1) ----------------------------
+# Reproduces the PCIe2 fdt workaround step-by-step and reports the guest's
+# cmdline / PCI devices / nvme presence, to compare Windows vs Linux builds.
+if [ "${RUN_DIAG:-0}" = "1" ]; then
+  log "U-Boot/PCIe diagnostic (diag_uboot_pcie.py)"
+  export QEMU_DIAG="$BUILD_DIR/qemu-system-aarch64"
+  export IMG_DIAG="$IMG_DIR/image-bmc"
+  export DIAG_LOG="$DIAG_LOG"
+  $PY "$WORKSPACE/faultinject/tests/diag_uboot_pcie.py" \
+      || { echo "DIAG FAILED (see $DIAG_LOG)"; exit 1; }
+fi
 
 # 7) performance regression gate --------------------------------------------
 if [ "${SKIP_PERF:-0}" != "1" ]; then
