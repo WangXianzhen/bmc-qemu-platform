@@ -176,41 +176,53 @@ def bmc():
         threading.Thread(target=_uboot_newline_spam,
                          args=(console, 15, 120, stop_spam),
                          daemon=True).start()
+        uboot = {"prompt": False, "shell": False, "pcie_ok": False,
+                 "fallback": False}
         if console.wait_for(r"Hit any key to stop autoboot", timeout=300):
+            uboot["prompt"] = True
             console.send("\n")
         if console.wait_for(r"=>", timeout=30):   # at the U-Boot prompt
+            uboot["shell"] = True
             console.try_cmd(
                 'setenv bootargs "${bootargs} cryptomgr.notests=1"',
                 r"=>", timeout=20)
             stop_spam.set()
             # PCIe2 fdt workaround (the official AST2700 test sequence) so
             # PCIe devices (e1000e/nvme on pcie.2) are visible to the guest.
-            # Fall back to plain `boot` if the sequence fails.
-            pcie_ok = (console.try_cmd("cp 100420000 403000000 900000",
-                                       r"=>", timeout=30)
-                       and console.try_cmd("bootm start 403000000",
-                                           r"=>", timeout=30)
-                       and console.try_cmd("bootm loados", r"=>", timeout=30)
-                       and console.try_cmd("bootm ramdisk", r"=>", timeout=30)
-                       and console.try_cmd("bootm prep", r"=>", timeout=30)
-                       and console.try_cmd(
-                           'fdt set /soc@14000000/pcie@140d0000 status "okay"',
-                           r"=>", timeout=30)
-                       and console.try_cmd("bootm go",
-                                           r"Starting kernel|login:",
-                                           timeout=600))
-            if not pcie_ok:
+            # Generous per-step timeouts: `cp` of ~9MB and the bootm steps can
+            # be slow under TCG on shared CI runners.
+            uboot["pcie_ok"] = (console.try_cmd("cp 100420000 403000000 900000",
+                                                r"=>", timeout=90)
+                                and console.try_cmd("bootm start 403000000",
+                                                    r"=>", timeout=90)
+                                and console.try_cmd("bootm loados", r"=>",
+                                                    timeout=90)
+                                and console.try_cmd("bootm ramdisk", r"=>",
+                                                    timeout=90)
+                                and console.try_cmd("bootm prep", r"=>",
+                                                    timeout=90)
+                                and console.try_cmd(
+                                    'fdt set /soc@14000000/pcie@140d0000 '
+                                    'status "okay"',
+                                    r"=>", timeout=90)
+                                and console.try_cmd("bootm go",
+                                                    r"Starting kernel|login:",
+                                                    timeout=600))
+            if not uboot["pcie_ok"]:
+                uboot["fallback"] = True
                 console.try_cmd("boot", r"Starting kernel|login:",
                                 timeout=600)
         else:
             stop_spam.set()
+            uboot["fallback"] = True
+            console.try_cmd("boot", r"Starting kernel|login:", timeout=600)
         console.wait_for(r"login:", timeout=600)   # SDK v11.03 boots to login
 
         # Log in so the tests get a real shell (without login, every
         # console command just hits the login prompt -> 'Login incorrect').
         console.exec_cmd("root", r"Password:", timeout=30)
         console.exec_cmd("0penBmc", r"root@", timeout=30)
-        yield {"qmp": qmp, "console": console}
+        yield {"qmp": qmp, "console": console, "uboot": uboot}
         qmp.close()
     finally:
         proc.terminate()
@@ -240,7 +252,9 @@ def test_storage_io_error_guest_visible(bmc):
         pytest.skip(f"no reply to ls; console delta: "
                     f"{console.read()[len(c1):][-1200:]!r}")
     if "nvme0n1" not in console.read().split("LS_DONE=")[-1]:
-        pytest.skip("nvme0n1 not enumerated (PCIe fdt workaround needed)")
+        pytest.skip("nvme0n1 not enumerated; "
+                    f"uboot={bmc.get('uboot')} "
+                    "(PCIe fdt workaround needed)")
 
     off = os.path.getsize(NVME_TRACE) if os.path.exists(NVME_TRACE) else 0
     cpos = len(console.read())
