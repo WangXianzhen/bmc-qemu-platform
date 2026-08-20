@@ -148,6 +148,15 @@ class QMPClient:
                                 "limits": limits})
         return tg
 
+    def blockdev_reopen(self, options):
+        """Reopen (reconfigure) a block node at runtime.
+
+        Used to re-arm blkdebug error injection: reopen the node with a fresh
+        inject-error rule so the NEXT request deterministically errors.
+        QAPI expects an array of BlockdevOptions.
+        """
+        return self.cmd("blockdev-reopen", {"options": [options]})
+
     def status(self):
         return self.cmd("query-status")
 

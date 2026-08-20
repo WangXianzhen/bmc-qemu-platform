@@ -148,7 +148,7 @@ def bmc():
          # storage: file backend + blkdebug error injection (write_aio, once)
          "-blockdev", f"driver=file,node-name=nvme-file,filename={NVME_IMG}",
          "-blockdev", "driver=blkdebug,node-name=nvme-bd,image=nvme-file,"
-                      "inject-error.0.event=write_aio,"
+                      "inject-error.0.event=pwritev,"
                       "inject-error.0.errno=5,"
                       "inject-error.0.once=on",
          "-device", "nvme,serial=SN0001,drive=nvme-bd,bus=pcie.2,id=nvme0",
@@ -247,20 +247,19 @@ def test_storage_io_error_guest_visible(bmc):
         pytest.skip(f"guest shell not responsive; console delta: "
                     f"{console.read()[len(c0):][-800:]!r}")
     c1 = console.read()
-    if not console.try_cmd("ls /dev/nvme0n1; echo LS_DONE=$?",
-                           r"LS_DONE=\d+", timeout=30):
-        pytest.skip(f"no reply to ls; console delta: "
-                    f"{console.read()[len(c1):][-1200:]!r}")
-    if "nvme0n1" not in console.read().split("LS_DONE=")[-1]:
-        pytest.skip("nvme0n1 not enumerated; "
-                    f"uboot={bmc.get('uboot')} "
-                    "(PCIe fdt workaround needed)")
+    ls_out = console.try_cmd_text("ls /dev/nvme0n1; echo LS_DONE=$?",
+                                  r"LS_DONE=\d+", timeout=30)
+    if ls_out is None or not re.search(r"LS_DONE=0", ls_out):
+        pytest.skip(f"nvme0n1 not enumerated; uboot={bmc.get('uboot')} "
+                    f"(PCIe fdt workaround needed)")
 
+    # Re-arm note: blockdev-reopen cannot change inject-error rules, so the
+    # launch-time rule must use the event the write path actually emits:
+    # `pwritev` (the old `write_aio` event never fires on this QEMU).
+    # busybox dd has no oflag=direct; the injected EIO surfaces as a kernel
+    # 'Buffer I/O error' on the console, matching the PASS check below.
     off = os.path.getsize(NVME_TRACE) if os.path.exists(NVME_TRACE) else 0
     cpos = len(console.read())
-    # NB: this image's busybox has no `timeout` command, so run dd directly;
-    # with the nvme DNR fix (P6) the blkdebug-injected EIO completes the
-    # command immediately instead of retrying forever.
     txt = console.try_cmd_text("dd if=/dev/zero of=/dev/nvme0n1 "
                                "bs=1M count=4 2>&1; echo RC=$?",
                                r"RC=\d+", timeout=45)

@@ -90,7 +90,7 @@ def main():
          "-drive", f"file={IMG},format=raw,if=mtd",
          "-blockdev", f"driver=file,node-name=nvme-file,filename={NVME_IMG}",
          "-blockdev", "driver=blkdebug,node-name=nvme-bd,image=nvme-file,"
-                      "inject-error.0.event=write_aio,"
+                      "inject-error.0.event=pwritev,"
                       "inject-error.0.errno=5,"
                       "inject-error.0.once=on",
          "-device", "nvme,serial=SN0001,drive=nvme-bd,bus=pcie.2,id=nvme0",
@@ -165,7 +165,7 @@ def main():
         seg = full().split("ls /sys/class/net/")[-1][:200]
         log(f"  net: {seg.strip()!r}")
 
-        log("== storage EIO scenario (blkdebug + nvme DNR fix) ==")
+        log("== storage EIO scenario (launch pwritev+once rule + DNR) ==")
         base = len(full())
         con.sock.sendall(b"dd if=/dev/zero of=/dev/nvme0n1 bs=1M count=4 "
                          b"2>&1; echo RC=$?\n")
