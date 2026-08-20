@@ -139,7 +139,6 @@ def bmc():
     proc = subprocess.Popen(
         [QEMU, "-machine", "ast2700-evb", "-smp", "4", "-m", "2G",
          "-drive", f"file={IMG},format=raw,if=mtd",
-         "-trace", "enable=pci_nvme_*", "-D", NVME_TRACE,
          # emulated managed-platform components (see launch_ast2700.sh)
          "-device", "tmp105,bus=aspeed.i2c.bus.1,address=0x4d,id=temp-mb",
          "-device", "adm1272,bus=aspeed.i2c.bus.1,address=0x10,id=psu0",
