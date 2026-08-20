@@ -10,6 +10,7 @@ Console interaction mirrors QEMU's own functional tests
 """
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
